@@ -27,7 +27,7 @@ class BayesianFlowNetwork(nn.Module):
     def forward(self, theta, t):
         theta = (theta * 2) - 1  # scaled in [-1, 1]
         theta = theta.view(theta.shape[0], -1)  # (B, D * K)
-        input = torch.cat((theta, t.unsqueeze(-1)), dim=-1)
+        input = torch.cat((theta, t), dim=-1)
         return self.model(input)
 
     # algorithm 182 - unclear what to set the value for beta(1)?
@@ -48,7 +48,7 @@ class BayesianFlowNetwork(nn.Module):
         # std is a function of the noise and number of classes, covariance is identity (e.g. independence assumption)
         # !!! interestingly we don't need the idenity here - I guess its simply modeled as independent vectors? not sure when you would need the identity
         std = torch.sqrt(beta * self.k)
-        # samople random noise so we can sample from the sender
+        # sample random noise so we can sample from the sender
         eps = torch.randn(e_x.shape[1])
         return mean + std * eps
 
@@ -59,7 +59,6 @@ class BayesianFlowNetwork(nn.Module):
     # their pseudo function in section 6.13
     def discrete_output_distribution(self, theta, t):
         # pass all theta and time into model
-        print(theta.shape, t.shape)
         output_distribution = self(theta, t)
         # ensure output is valid probability distribution
         if self.k == 2:
@@ -81,7 +80,7 @@ class BayesianFlowNetwork(nn.Module):
     def continuous_time_loss_for_discrete_data(self, e_x):
 
         batch_size = e_x.shape[0]
-        # input data is -> B * D. One hot changes to B * D * K. e.g. [0, 0] -> [[1, 0], [1, 0], and [1, 1] -> [[0, 1], [0, 1]]
+        # input data is -> B * D. One hot changes to B * D * K. e.g. [0, 0] -> [[1, 0], [1, 0], and [1, 0] -> [[0, 1], [1, 0]]
         e_x = F.one_hot(e_x, num_classes=self.k).float()
 
         # alg line 1 t -> B
@@ -101,75 +100,42 @@ class BayesianFlowNetwork(nn.Module):
         # alg line 7 L infinity
         return torch.mean(self.k * self.beta_one * t[:, None] * (e_x - e_hat)**2)
     
-    # # algorithm 9
-    # def sample_generation_for_discrete_data(self, d=2, bs=64, n_steps=20):
+    # algorithm 9
+    def sample_generation_for_discrete_data(self, d=2, bs=64, n_steps=20):
 
-    #     # initialise prior with uniform distribution
-    #     prior = torch.ones(bs, d, self.k) / self.k
+        # initialise prior with uniform distribution
+        prior = torch.ones(bs, d, self.k) / self.k
 
-    #     # iterate over n_steps
-    #     for i in range(1, n_steps):
+        # iterate over n_steps
+        for i in range(1, n_steps+1):
 
-    #         # time is set to fraction from 
-    #         t = self.get_time_at_t((i-1)/n_steps, bs=bs)
+            # time is set to fraction from 
+            t = self.get_time_at_t((i-1)/n_steps, bs=bs)
 
-    #         output_distribution = self.model(prior, t)
-            
+            output_distribution = self.discrete_output_distribution(prior, t)
+            # sample from output distribution to get 'prediction' of true class label
+            e_k = F.one_hot(torch.distributions.Categorical(probs=output_distribution).sample()).float()
 
-    #         # sample from output distribution to get 'prediction' of true class label
-    #         e_k = F.one_hot(torch.distributions.Categorical(probs=output_distribution).sample()).float()
-
-    #         # create alpha from beta(1) and t
-    #         alpha = torch.tensor(self.beta_one * (((2*i)-1) / (n_steps**2)))
-    #         # convert our prediction back to 'sender' distribution
-    #         eps = torch.randn_like(e_k)
-    #         y_mean = alpha * (self.k * e_k - 1)
-    #         y_std = torch.sqrt(alpha * self.k)
-    #         y = y_mean + (y_std * eps)
-
-    #         # bayesian update our sample 
-    #         theta_prime = torch.exp(y) * prior
-    #         print(theta_prime[0])
-    #         # convert back to a probability distribution
-    #         prior = theta_prime / torch.sum(theta_prime, dim=-1, keepdim=True)
-    #         print(prior[0])
-
-    #     # one final pass of our distribution through the model to get final predictive distribution
-    #     output_distribution = self.model(prior, torch.ones_like(t))
-    #     prediction = torch.distributions.Categorical(probs=output_distribution).sample()
-
-    #     return prediction
-
-    @torch.inference_mode()
-    def sample_generation_for_discrete_data(self, batch_size=128, nb_steps=10, device='cpu'):
-        self.eval()
-        
-        # get prior 
-        theta = torch.ones((batch_size, self.d, self.k), device=device) / self.k
-
-        for i in range(1, nb_steps+1):
-            t = (i-1) / nb_steps
-            t = t * torch.ones((theta.shape[0]), device=theta.device, dtype=theta.dtype).view(-1)
-            
-            k_probs = self.discrete_output_distribution(theta, t)  # (B, D, K)
-            k = torch.distributions.Categorical(probs=k_probs).sample()  # (B, D)
-            alpha = self.beta_one * (2 * i - 1) / (nb_steps ** 2)
-
-            e_k = F.one_hot(k, num_classes=self.k).float()  # (B, D, K)
-            mean = alpha * (self.k * e_k - 1)
-            var = (alpha * self.k)
-            std = torch.full_like(mean, fill_value=var).sqrt()
+            # create alpha from beta(1) and t
+            alpha = torch.tensor(self.beta_one * (((2*i)-1) / (n_steps**2)))
+            # convert our prediction back to 'sender' distribution
             eps = torch.randn_like(e_k)
-            
-            y = mean + std * eps  # (B, D, K)
-            
-            theta_prime = torch.exp(y) * theta
-            theta = theta_prime / theta_prime.sum(-1, keepdim=True)
+            y_mean = alpha * (self.k * e_k - 1)
+            y_std = torch.sqrt(alpha * self.k)
+            y = y_mean + (y_std * eps)
 
-        k_probs_final = self.discrete_output_distribution(theta, torch.ones_like(t))
-        k_final = torch.distributions.Categorical(probs=k_probs_final).sample()
+            # bayesian update our sample 
+            theta_prime = torch.exp(y) * prior
 
-        return k_final
+            # convert back to a probability distribution
+            prior = theta_prime / torch.sum(theta_prime, dim=-1, keepdim=True)
+            # print(prior[0])
+
+        # one final pass of our distribution through the model to get final predictive distribution
+        output_distribution = self.discrete_output_distribution(prior, torch.ones_like(t))
+        prediction = torch.distributions.Categorical(probs=output_distribution).sample()
+
+        return prediction
 
 def right_pad_dims_to(x, t):
     padding_dims = x.ndim - t.ndim
