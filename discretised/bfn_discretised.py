@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class BayesianFlowNetwork(nn.Module):
+class BayesianFlowNetworkDiscretised(nn.Module):
     """
     Bayesian Flow Network class.
 
@@ -16,18 +16,18 @@ class BayesianFlowNetwork(nn.Module):
     """
 
     def __init__(self, model, k=16, sigma_one=0.02):
-        super(BayesianFlowNetwork, self).__init__()
+        super(BayesianFlowNetworkDiscretised, self).__init__()
         assert (k >= 2)
         self.k = k
         self.d = 1
         self.model = model
-        self.sigma_one = sigma_one
+        self.sigma_one = torch.tensor(sigma_one)
     
-    def sample_from_closed_form_bayesian_update(self, x, gamma, t):
+    def sample_from_closed_form_bayesian_update(self, x, gamma):
         mu = gamma*x
         std = gamma*(1-gamma)
         eps = torch.randn_like(x)
-        return mu + std * eps
+        return mu + (std * eps)
 
     def get_gamma_t(self, t):
         return 1 - self.sigma_one**(2*t)
@@ -38,39 +38,63 @@ class BayesianFlowNetwork(nn.Module):
     def get_time_at_t(self, t, bs):
         return torch.tensor(t).repeat(bs).unsqueeze(1)
     
-    def discretised_cdf(mu, sigma, x):
+    def discretised_cdf(self, mu, sigma, x):
         if x < -1:
             return 0
         if x > 1:
             return 1
         else:
-            return 0.5 * (1 + torch.erf((x-mu) / (sigma*torch.sqrt(2))))
+            return 0.5 * (1 + torch.erf((x-mu) / ( sigma*torch.sqrt( torch.tensor(2.0) ) ) ) )
         
+    # def vectorised_discretised_cdf(self, mu, sigma, bounds):
+    #     # input is mu, sigma -> B x D, and bounds -> K
+    #     lower_mask = bounds < -1
+    #     upper_mask = bounds > 1
 
+    #     # output is B x D x K
+    #     result = torch.zeros(mu.shape[0], mu.shape[1], bounds.shape[0])
+    #     result = 0.5 * (1 + torch.erf((bounds - mu.unsqueeze(-1)) / (sigma.unsqueeze(-1) * torch.sqrt(torch.tensor(2.0)))))
+    #     # clip result depending on bounds
+    #     result = result.masked_fill(lower_mask,  0.)
+    #     result = result.masked_fill(upper_mask, 1.)
+
+    #     return result
+        
     def forward(self, mu, t):
+        # concatenate time onto the means
         input = torch.cat((mu, t), dim=-1)
-        return self.model(input)
+        # run this through the model
+        output = self.model(input)
+        # split the output into the mean and log variance
+        mean, log_var = torch.split(output, 1, dim=-1)
+        return mean.squeeze(-1), log_var.squeeze(-1)
 
     def discretised_output_distribution(self, mu, t, gamma, t_min=1e-6):
 
-        # run the sender distribution through the model, clip if out of bounds   
-        if t<t_min:
-            # TODO: CHECK IF T IS LESS THAN T_MIN AND THEN SET MU AND SIGMA TO 0 AND 1, for that X
-            mu_x = 0
-            sigma_x = 1
-        else:
-            mu_eps, ln_sigma_eps = self.forward(mu, t)
-            var_scale = (1-gamma)/gamma
-            mu_x = (mu/gamma) - torch.sqrt(var_scale * torch.exp(mu_eps))
-            sigma_x = torch.sqrt(var_scale * torch.exp(ln_sigma_eps))
-            # 32 x D x 2 output params
+        # input is B x D one for each mean
 
-        # we convert this to 32 x D x K bins
-        # we get a continuous distribution, we need to discretise it, into K bins
-        discretised_output_dist = torch.zeros(self.d, self.k)
-        for i in range(self.d):
-            for j in range(self.k):
-                discretised_output_dist[i, j] = self.discretised_cdf(mu_x[i], sigma_x[i], self.get_lower_bin_bound(j)) - self.discretised_cdf(mu_x[i], sigma_x[i], self.get_upper_bin_bound(j))
+        # run the samples through the model -> B x D x 2
+        mu_eps, ln_sigma_eps = self.forward(mu, t)
+        var_scale = (1-gamma)/gamma
+        # update w.r.t noise predictions
+        mu_x = (mu/gamma) - torch.sqrt(var_scale * torch.exp(mu_eps))
+        sigma_x = torch.sqrt(var_scale * torch.exp(ln_sigma_eps))
+        #  clip output distribution if time is lower than min threshold
+        time_out_of_bound_mask = t < t_min
+        mu_x = mu_x.masked_fill(time_out_of_bound_mask, 0.)
+        sigma_x = sigma_x.masked_fill(time_out_of_bound_mask, 1.)
+
+        # Calculate the lower and upper bounds for all bins -> shape: K,
+        lower_bounds = self.get_lower_bin_bound(torch.arange(1, self.k+1))
+        upper_bounds = self.get_upper_bin_bound(torch.arange(1, self.k+1))
+
+        # Calculate the discretised output distribution using vectorized operations
+        # discretised_output_dist = self.vectorised_discretised_cdf(mu_x, sigma_x, lower_bounds) - self.vectorised_discretised_cdf(mu_x, sigma_x, upper_bounds)
+        discretised_output_dist = torch.zeros(mu.shape[0], mu.shape[1], self.k)
+        for b in range(mu.shape[0]):
+            for d in range(mu.shape[1]):
+                for k in range(self.k):
+                    discretised_output_dist[b, d, k] = self.discretised_cdf(mu_x[b, d], sigma_x[b, d], upper_bounds[k]) - self.discretised_cdf(mu_x[b, d], sigma_x[b, d], lower_bounds[k])
 
         return discretised_output_dist
 
@@ -89,20 +113,21 @@ class BayesianFlowNetwork(nn.Module):
         # Shape-> B*D data is samples from the discretised distribution
 
         batch_size = discretised_data.shape[0]
+        # time, gamma -> B
         t = self.sample_t_uniformly(batch_size)
         gamma = self.get_gamma_t(t)
 
         # Shape-> B*D from the discretised data, create noisy sender sample from a normal centered around data and known variance
-        sender_mu_sample = self.sample_from_closed_form_bayesian_update(discretised_data, gamma)
+        sender_mu_sample = self.sample_from_closed_form_bayesian_update(discretised_data, gamma=gamma)
 
         # Shape-> B*D*K bins pass the noisy samples to the model, output a continuous distribution and rediscretise it
-        output_distribution = self.discretised_output_distribution(sender_mu_sample, t, gamma)
+        output_distribution = self.discretised_output_distribution(sender_mu_sample, t=t, gamma=gamma)
 
         k_c = self.get_bin_centers()
         # Shape-> B*D sum out over final distribution - weighted sums
         k_hat = torch.sum(output_distribution*k_c, dim=-1)
         
-        loss = - torch.log(self.sigma_one) * self.sigma_one**(-2*t) * (discretised_data - k_hat)**2
+        loss = torch.mean(-torch.log(self.sigma_one) * self.sigma_one**(-2*t) * (discretised_data - k_hat)**2)
 
         return loss
     
@@ -124,13 +149,14 @@ class BayesianFlowNetwork(nn.Module):
 
             # B x D x K
             output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
+            print('output_distribution', output_distribution.shape, 'max and min', output_distribution.max(), output_distribution.min())
 
             # SHAPE B
-            alpha = self.sigma_one**((-2*i)/n_steps) (1 - self.sigma_one**(-2/n_steps))
+            alpha = self.sigma_one**( (-2*i) / n_steps ) * (1 - self.sigma_one**(-2/n_steps))
 
             # sample from y distribution centered around 'k centers'
-            eps = torch.randn_like(k)
-            std = 1/alpha
+            eps = torch.randn(bs).unsqueeze(-1)
+            std = torch.zeros_like(eps).fill_(1/alpha)
             k_centers = self.get_bin_centers()
             # SHAPE B x D
             mean = torch.sum(output_distribution*k_centers, dim=-1)

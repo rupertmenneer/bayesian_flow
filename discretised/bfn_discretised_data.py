@@ -38,7 +38,7 @@ class DiscretisedBimodalData(Dataset):
         x = self.data[index]
         # clip data to between -1 and 1
         x = torch.clamp(x, min=-1, max=1)
-        return x
+        return x.unsqueeze(-1)
 
     def create_discretised_bimodal(self):
         # Create a bimodal distribution and generate samples from it
