@@ -165,7 +165,6 @@ class BayesianFlowNetworkDiscretised(nn.Module):
 
             # B x D x K
             output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
-            print('output_distribution', output_distribution.shape, 'max and min', output_distribution.max(), output_distribution.min())
 
             # SHAPE B
             alpha = self.sigma_one**( (-2*i) / n_steps ) * (1 - self.sigma_one**(-2/n_steps))
