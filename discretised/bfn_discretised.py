@@ -38,13 +38,13 @@ class BayesianFlowNetworkDiscretised(nn.Module):
     def get_time_at_t(self, t, bs):
         return torch.tensor(t).repeat(bs).unsqueeze(1)
     
-    def discretised_cdf(self, mu, sigma, x):
-        if x < -1:
-            return 0
-        if x > 1:
-            return 1
-        else:
-            return 0.5 * (1 + torch.erf((x-mu) / ( sigma*torch.sqrt( torch.tensor(2.0) ) ) ) )
+    # def discretised_cdf(self, mu, sigma, x):
+    #     if x < -1:
+    #         return 0
+    #     if x > 1:
+    #         return 1
+    #     else:
+    #         return 0.5 * (1 + torch.erf((x-mu) / ( sigma*torch.sqrt( torch.tensor(2.0) ) ) ) )
         
     # def vectorised_discretised_cdf(self, mu, sigma, bounds):
     #     # input is mu, sigma -> B x D, and bounds -> K
@@ -57,8 +57,27 @@ class BayesianFlowNetworkDiscretised(nn.Module):
     #     # clip result depending on bounds
     #     result = result.masked_fill(lower_mask,  0.)
     #     result = result.masked_fill(upper_mask, 1.)
-
     #     return result
+
+    def vectorised_cdf(self, mu, sigma, x):
+
+        # ensure shapes align for correct broadcasting
+        mu = mu.unsqueeze(-1)  # Shape: [B, D, 1]
+        sigma = sigma.unsqueeze(-1)  # Shape: [B, D, 1]
+        x = x.unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, K]
+        assert mu.dim() == sigma.dim() == x.dim()
+
+        cdf_func = 0.5 * (1 + torch.erf((x - mu) / (sigma * torch.sqrt(torch.tensor(2.0)))))
+
+        # Apply conditions directly without squeezing, using broadcasting
+        lower_mask = x < -1
+        upper_mask = x > 1
+
+        # Apply masks
+        cdf_func = torch.where(lower_mask, torch.zeros_like(cdf_func), cdf_func)
+        cdf_func = torch.where(upper_mask, torch.ones_like(cdf_func), cdf_func)
+
+        return cdf_func
         
     def forward(self, mu, t):
         # concatenate time onto the means
@@ -88,13 +107,10 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         lower_bounds = self.get_lower_bin_bound(torch.arange(1, self.k+1))
         upper_bounds = self.get_upper_bin_bound(torch.arange(1, self.k+1))
 
-        # Calculate the discretised output distribution using vectorized operations
-        # discretised_output_dist = self.vectorised_discretised_cdf(mu_x, sigma_x, lower_bounds) - self.vectorised_discretised_cdf(mu_x, sigma_x, upper_bounds)
-        discretised_output_dist = torch.zeros(mu.shape[0], mu.shape[1], self.k)
-        for b in range(mu.shape[0]):
-            for d in range(mu.shape[1]):
-                for k in range(self.k):
-                    discretised_output_dist[b, d, k] = self.discretised_cdf(mu_x[b, d], sigma_x[b, d], upper_bounds[k]) - self.discretised_cdf(mu_x[b, d], sigma_x[b, d], lower_bounds[k])
+        # # Calculate the discretised output distribution using vectorized operations
+        discretised_cdf_lower = self.vectorised_cdf(mu_x, sigma_x, lower_bounds)
+        discretised_cdf_upper = self.vectorised_cdf(mu_x, sigma_x, upper_bounds)
+        discretised_output_dist = discretised_cdf_upper - discretised_cdf_lower
 
         return discretised_output_dist
 
