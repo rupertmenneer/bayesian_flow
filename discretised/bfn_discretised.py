@@ -32,6 +32,10 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         self.d = 1
         self.model = model
         self.sigma_one = torch.tensor(sigma_one)
+        # Calculate the lower and upper bounds for all bins -> shape: K,
+        self.k_centers = self.get_k_centers()
+        self.k_lower = self.k_centers - (1/self.k)
+        self.k_upper = self.k_centers + (1/self.k)
     
     def sample_from_closed_form_bayesian_update(self, x, gamma):
         std = gamma*(1-gamma)
@@ -42,10 +46,14 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         return 1 - self.sigma_one.pow(2*t)
 
     def sample_t_uniformly(self, n):
-        return torch.rand(n).unsqueeze(1)
+        return torch.rand((n, 1))
     
     def get_time_at_t(self, t, bs):
         return torch.tensor(t).repeat(bs).unsqueeze(1)
+    
+    def get_k_centers(self):
+        k_ = torch.linspace(1, self.k, self.k )
+        return ((2 * k_ - 1)/self.k) - 1
         
     def forward(self, mu, t):
         # Shape-> B*(D+1) concatenate time onto the means
@@ -62,68 +70,57 @@ class BayesianFlowNetworkDiscretised(nn.Module):
 
         # run the samples through the model -> B x D x 2
         mu_eps, ln_sigma_eps = self.forward(mu, t)
-        var_scale = torch.sqrt((1-gamma)/gamma)
 
+        var_scale = torch.sqrt((1-gamma)/gamma)
         # update w.r.t noise predictions
         mu_x = (mu/gamma) - (var_scale * mu_eps)
         sigma_x = var_scale * safe_exp(ln_sigma_eps)
 
         #  clip output distribution if time is lower than min threshold
-        time_out_of_bound_mask = t < t_min
-        mu_x = mu_x.masked_fill(time_out_of_bound_mask, 0.)
-        sigma_x = sigma_x.masked_fill(time_out_of_bound_mask, 1.)
+        mu_x = torch.where(t < t_min, torch.zeros_like(mu_x), mu_x)
+        sigma_x = torch.where(t < t_min, torch.ones_like(sigma_x), sigma_x)
 
-        # Calculate the lower and upper bounds for all bins -> shape: K,
-        lower_bounds = self.get_lower_bin_bound(torch.arange(1, self.k+1))
-        upper_bounds = self.get_upper_bin_bound(torch.arange(1, self.k+1))
 
         # # Calculate the discretised output distribution using vectorized operations
         normal_dist = dist.Normal(mu_x, sigma_x)
-        
-        cdf_values_lower = normal_dist.cdf(lower_bounds)
+        cdf_values_lower = normal_dist.cdf(self.k_lower)
         # ensure first bin has area 0
-        cdf_values_lower = torch.where(lower_bounds<=-1, torch.zeros_like(cdf_values_lower), cdf_values_lower)
-
-        cdf_values_upper = normal_dist.cdf(upper_bounds)
-        cdf_values_upper = torch.where(upper_bounds>=1, torch.ones_like(cdf_values_upper), cdf_values_upper)
+        cdf_values_lower = torch.where(self.k_lower<=-1, torch.zeros_like(cdf_values_lower), cdf_values_lower)
+        cdf_values_upper = normal_dist.cdf(self.k_upper)
         # ensure last bin has area 1
+        cdf_values_upper = torch.where(self.k_upper>=1, torch.ones_like(cdf_values_upper), cdf_values_upper)
 
         discretised_output_dist = cdf_values_upper - cdf_values_lower
 
         return discretised_output_dist
-
-    def get_lower_bin_bound(self, j):
-        return ((2 * (j-1))/self.k) - 1
-    
-    def get_upper_bin_bound(self, j):
-        return ((2 * j)/self.k) - 1
-
-    def get_bin_centers(self):
-        k_ = torch.linspace(1, self.k, self.k )
-        return ((2 * k_ - 1)/self.k) - 1
 
     def continuous_time_loss_for_discretised_data(self, discretised_data):
 
         # Shape-> B*D data is samples from the discretised distribution
 
         batch_size = discretised_data.shape[0]
-        # time, gamma -> B
+        # time, gamma -> B, 1
         t = self.sample_t_uniformly(batch_size)
         gamma = self.get_gamma_t(t)
 
         # Shape-> B*D from the discretised data, create noisy sender sample from a normal centered around data and known variance
         sender_mu_sample = self.sample_from_closed_form_bayesian_update(discretised_data, gamma=gamma)
 
+        # print('t', t.shape, 'gamma', gamma.shape, 'sender_mu_sample', sender_mu_sample.shape, 'discretised_data', discretised_data.shape)
+
         # Shape-> B*D*K bins pass the noisy samples to the model, output a continuous distribution and rediscretise it
         output_distribution = self.discretised_output_distribution(sender_mu_sample, t=t, gamma=gamma)
 
-        k_c = self.get_bin_centers()
-        gmm = output_distribution*k_c
+        # print('output_distribution', output_distribution.shape)
+        gmm = output_distribution*self.k_centers
         # Shape-> B*D sum out over final distribution - weighted sums
-        k_hat = torch.sum(gmm, dim=-1)
+        k_hat = torch.sum(gmm, dim=-1).view(-1, 1)
+
+        # print('k_hat', k_hat.shape)
         
         # Shape-> B*D
         diff = (discretised_data - k_hat).pow(2)
+        # print('diff', diff.shape)
         # Shape-> scalar, then B*1, B*D
         loss = -safe_log(self.sigma_one) * self.sigma_one.pow(-2*t) * diff
         loss = torch.mean(loss)
@@ -156,22 +153,22 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             # sample from y distribution centered around 'k centers'
             eps = torch.randn(bs).unsqueeze(-1)
             std = torch.zeros_like(eps).fill_(1/alpha)
-            k_centers = self.get_bin_centers()
             # SHAPE B x D
-            mean = torch.sum(output_distribution*k_centers, dim=-1)
+            mean = torch.sum(output_distribution*self.k_centers, dim=-1).view(-1, 1)
             y_sample = mean + std * eps
+            # print('y_sample', y_sample.shape)
 
             # update our prior precisions and means w.r.t to our new sample
-            prior_tracker[:, :, 0, i] = prior_mu
-            prior_tracker[:, :, 1, i] = prior_precision
+            # prior_tracker[:, :, 0, i] = prior_mu
+            # prior_tracker[:, :, 1, i] = prior_precision
             prior_mu = (prior_precision*prior_mu + alpha*y_sample) / (prior_precision + alpha)
             prior_precision = alpha + prior_precision
+            # print('prior_mu', prior_mu.shape)
     
         # final pass of our distribution through the model to get final predictive distribution
         output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
-        k_centers = self.get_bin_centers()
         # SHAPE B x D
-        output_mean = torch.sum(output_distribution*k_centers, dim=-1)
+        output_mean = torch.sum(output_distribution*self.k_centers, dim=-1)
 
         return output_mean, prior_tracker
 

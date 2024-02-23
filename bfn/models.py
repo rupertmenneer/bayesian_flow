@@ -3,7 +3,7 @@ import torch.nn as nn
 
 class SimpleNeuralNetworkDiscretised(nn.Module):
 
-    def __init__(self, d = 1, hidden_dim = 64):
+    def __init__(self, d = 1, hidden_dim = 8):
         super(SimpleNeuralNetworkDiscretised, self).__init__()
 
         # Define the number of output classes based on K
