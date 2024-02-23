@@ -28,8 +28,15 @@ class DiscretisedBimodalData(Dataset):
     def __init__(self, n=1024, k=16):
         self.n = n
         self.k = k
+        self.k_centers = self.get_k_centers()
+        self.k_lower = self.k_centers - (1/self.k)
+        self.k_upper = self.k_centers + (1/self.k)
         self.data = self.create_discretised_bimodal()
 
+
+    def get_k_centers(self):
+        k_ = torch.linspace(1, self.k, self.k )
+        return ((2 * k_ - 1)/self.k) - 1
 
     def __len__(self):
         return self.n
@@ -57,20 +64,15 @@ class DiscretisedBimodalData(Dataset):
         normalized_data = (bimodal_data - min_val) / (max_val - min_val) * 2 - 1
         
         # discretise the bimodal distribution into K bins
-        discretised_data = quantize(normalized_data, self.k)
+        discretised_data = quantize_tensor(normalized_data, self.k_upper, self.k_lower, self.k_centers)
 
         return discretised_data
 
 
-def idx_to_float(idx: np.ndarray, num_bins: int):
-    flt_zero_one = (idx + 0.5) / num_bins
-    return (2.0 * flt_zero_one) - 1.0
-
-
-def float_to_idx(flt: np.ndarray, num_bins: int):
-    flt_zero_one = (flt / 2.0) + 0.5
-    return torch.clamp(torch.floor(flt_zero_one * num_bins), min=0, max=num_bins - 1).long()
-
-
-def quantize(flt, num_bins: int):
-    return idx_to_float(float_to_idx(flt, num_bins), num_bins)
+def quantize_tensor(data, upper, lower, center):
+    new_data = torch.zeros_like(data)
+    for idx in range(len(data)):
+        for k in range(len(upper)):
+            if data[idx] >= lower[k] and data[idx] < upper[k]:
+                new_data[idx] = center[k]
+    return new_data
