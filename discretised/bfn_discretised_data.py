@@ -42,8 +42,8 @@ class DiscretisedBimodalData(Dataset):
 
     def create_discretised_bimodal(self):
         # Create a bimodal distribution and generate samples from it
-        mean_0, std_0 = -2, 0.5
-        mean_1, std_1 = 2, 1
+        mean_0, std_0 = -5, 0.5
+        mean_1, std_1 = 3, 0.5
         dist_0 = torch.distributions.normal.Normal(mean_0, std_0)
         dist_1 = torch.distributions.normal.Normal(mean_1, std_1)
         samples_0 = dist_0.sample((self.n // 2,))
