@@ -70,7 +70,6 @@ class BayesianFlowNetworkDiscretised(nn.Module):
 
         # run the samples through the model -> B x D x 2
         mu_eps, ln_sigma_eps = self.forward(mu, t)
-
         var_scale = torch.sqrt((1-gamma)/gamma)
         # update w.r.t noise predictions
         mu_x = (mu/gamma) - (var_scale * mu_eps)
@@ -80,7 +79,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         mu_x = torch.where(t < t_min, torch.zeros_like(mu_x), mu_x)
         sigma_x = torch.where(t < t_min, torch.ones_like(sigma_x), sigma_x)
 
-
+        # print(mu_x)
         # # Calculate the discretised output distribution using vectorized operations
         normal_dist = dist.Normal(mu_x, sigma_x)
         cdf_values_lower = normal_dist.cdf(self.k_lower)
@@ -132,41 +131,43 @@ class BayesianFlowNetworkDiscretised(nn.Module):
 
         # initialise prior with uniform distribution
         prior_mu = torch.zeros(bs, self.d)
-        prior_precision = torch.ones(bs, self.d)
+        prior_precision = torch.tensor(1)
 
         prior_tracker = torch.zeros(bs, self.d, 2, n_steps+1)
         # iterate over n_steps
         for i in range(1, n_steps+1):
 
-            # SHAPE B time is set to fraction from 
-            t = self.get_time_at_t((i-1)/n_steps, bs=bs)
-
-            # SHAPE B
-            gamma = self.get_gamma_t(t)
+            # SHAPE B,1 time is set to fraction from 
+            t = (i-1)/n_steps
+            # SHAPE B,1
+            # gamma = self.get_gamma_t(t)
 
             # B x D x K
-            output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
+            output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=(1-self.sigma_one.pow(2*t)))
 
-            # SHAPE B
-            alpha = self.sigma_one**( (-2*i) / n_steps ) * (1 - self.sigma_one**(2/n_steps))
+            # SHAPE scalar
+            alpha = self.sigma_one.pow((-2*i)/n_steps ) * (1 - self.sigma_one.pow(2/n_steps))
 
             # sample from y distribution centered around 'k centers'
-            eps = torch.randn(bs).unsqueeze(-1)
-            std = torch.zeros_like(eps).fill_(1/alpha)
+
+            # B, 1
+            eps = torch.randn(bs)
             # SHAPE B x D
-            mean = torch.sum(output_distribution*self.k_centers, dim=-1).view(-1, 1)
-            y_sample = mean + std * eps
-            # print('y_sample', y_sample.shape)
+            mean = torch.sum(output_distribution*self.k_centers, dim=-1)
+            y_sample = mean + ((1/alpha) * eps)
 
             # update our prior precisions and means w.r.t to our new sample
-            # prior_tracker[:, :, 0, i] = prior_mu
-            # prior_tracker[:, :, 1, i] = prior_precision
-            prior_mu = (prior_precision*prior_mu + alpha*y_sample) / (prior_precision + alpha)
+            prior_tracker[:, :, 0, i] = prior_mu
+            prior_tracker[:, :, 1, i] = prior_precision
+
+            # SHAPE B x D
+            prior_mu = (prior_precision*prior_mu.squeeze() + alpha*y_sample) / (prior_precision + alpha)
+            prior_mu = prior_mu.unsqueeze(1)
+            # shape scalar
             prior_precision = alpha + prior_precision
-            # print('prior_mu', prior_mu.shape)
     
         # final pass of our distribution through the model to get final predictive distribution
-        output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
+        output_distribution = self.discretised_output_distribution(prior_mu, torch.ones_like(t), gamma=(1-self.sigma_one.pow(2)))
         # SHAPE B x D
         output_mean = torch.sum(output_distribution*self.k_centers, dim=-1)
 
