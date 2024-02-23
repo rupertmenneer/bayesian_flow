@@ -1,6 +1,16 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from torch import Tensor
+import math
+import torch.distributions as dist
+
+CONST_log_range = 20
+CONST_log_min = 1e-10
+CONST_summary_rescale = 10
+CONST_exp_range = 10
+CONST_min_std_dev = math.exp(-CONST_exp_range)
 
 class BayesianFlowNetworkDiscretised(nn.Module):
     """
@@ -24,67 +34,25 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         self.sigma_one = torch.tensor(sigma_one)
     
     def sample_from_closed_form_bayesian_update(self, x, gamma):
-        mu = gamma*x
         std = gamma*(1-gamma)
         eps = torch.randn_like(x)
-        return mu + (std * eps)
+        return (x*gamma) + (std * eps)
 
     def get_gamma_t(self, t):
-        return 1 - self.sigma_one**(2*t)
+        return 1 - self.sigma_one.pow(2*t)
 
     def sample_t_uniformly(self, n):
         return torch.rand(n).unsqueeze(1)
     
     def get_time_at_t(self, t, bs):
         return torch.tensor(t).repeat(bs).unsqueeze(1)
-    
-    # def discretised_cdf(self, mu, sigma, x):
-    #     if x < -1:
-    #         return 0
-    #     if x > 1:
-    #         return 1
-    #     else:
-    #         return 0.5 * (1 + torch.erf((x-mu) / ( sigma*torch.sqrt( torch.tensor(2.0) ) ) ) )
-        
-    # def vectorised_discretised_cdf(self, mu, sigma, bounds):
-    #     # input is mu, sigma -> B x D, and bounds -> K
-    #     lower_mask = bounds < -1
-    #     upper_mask = bounds > 1
-
-    #     # output is B x D x K
-    #     result = torch.zeros(mu.shape[0], mu.shape[1], bounds.shape[0])
-    #     result = 0.5 * (1 + torch.erf((bounds - mu.unsqueeze(-1)) / (sigma.unsqueeze(-1) * torch.sqrt(torch.tensor(2.0)))))
-    #     # clip result depending on bounds
-    #     result = result.masked_fill(lower_mask,  0.)
-    #     result = result.masked_fill(upper_mask, 1.)
-    #     return result
-
-    def vectorised_cdf(self, mu, sigma, x):
-
-        # ensure shapes align for correct broadcasting
-        mu = mu.unsqueeze(-1)  # Shape: [B, D, 1]
-        sigma = sigma.unsqueeze(-1)  # Shape: [B, D, 1]
-        x = x.unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, K]
-        assert mu.dim() == sigma.dim() == x.dim()
-
-        cdf_func = 0.5 * (1 + torch.erf((x - mu) / (sigma * torch.sqrt(torch.tensor(2.0)))))
-
-        # Apply conditions directly without squeezing, using broadcasting
-        lower_mask = x < -1
-        upper_mask = x > 1
-
-        # Apply masks
-        cdf_func = torch.where(lower_mask, torch.zeros_like(cdf_func), cdf_func)
-        cdf_func = torch.where(upper_mask, torch.ones_like(cdf_func), cdf_func)
-
-        return cdf_func
         
     def forward(self, mu, t):
-        # concatenate time onto the means
+        # Shape-> B*(D+1) concatenate time onto the means
         input = torch.cat((mu, t), dim=-1)
         # run this through the model
         output = self.model(input)
-        # split the output into the mean and log variance
+        # Shape-> B*D*2, split the output into the mean and log variance
         mean, log_var = torch.split(output, 1, dim=-1)
         return mean.squeeze(-1), log_var.squeeze(-1)
 
@@ -94,10 +62,12 @@ class BayesianFlowNetworkDiscretised(nn.Module):
 
         # run the samples through the model -> B x D x 2
         mu_eps, ln_sigma_eps = self.forward(mu, t)
-        var_scale = (1-gamma)/gamma
+        var_scale = torch.sqrt((1-gamma)/gamma)
+
         # update w.r.t noise predictions
-        mu_x = (mu/gamma) - torch.sqrt(var_scale * torch.exp(mu_eps))
-        sigma_x = torch.sqrt(var_scale * torch.exp(ln_sigma_eps))
+        mu_x = (mu/gamma) - (var_scale * mu_eps)
+        sigma_x = var_scale * safe_exp(ln_sigma_eps)
+
         #  clip output distribution if time is lower than min threshold
         time_out_of_bound_mask = t < t_min
         mu_x = mu_x.masked_fill(time_out_of_bound_mask, 0.)
@@ -108,9 +78,17 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         upper_bounds = self.get_upper_bin_bound(torch.arange(1, self.k+1))
 
         # # Calculate the discretised output distribution using vectorized operations
-        discretised_cdf_lower = self.vectorised_cdf(mu_x, sigma_x, lower_bounds)
-        discretised_cdf_upper = self.vectorised_cdf(mu_x, sigma_x, upper_bounds)
-        discretised_output_dist = discretised_cdf_upper - discretised_cdf_lower
+        normal_dist = dist.Normal(mu_x, sigma_x)
+        
+        cdf_values_lower = normal_dist.cdf(lower_bounds)
+        # ensure first bin has area 0
+        cdf_values_lower = torch.where(lower_bounds<=-1, torch.zeros_like(cdf_values_lower), cdf_values_lower)
+
+        cdf_values_upper = normal_dist.cdf(upper_bounds)
+        cdf_values_upper = torch.where(upper_bounds>=1, torch.ones_like(cdf_values_upper), cdf_values_upper)
+        # ensure last bin has area 1
+
+        discretised_output_dist = cdf_values_upper - cdf_values_lower
 
         return discretised_output_dist
 
@@ -140,10 +118,15 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         output_distribution = self.discretised_output_distribution(sender_mu_sample, t=t, gamma=gamma)
 
         k_c = self.get_bin_centers()
+        gmm = output_distribution*k_c
         # Shape-> B*D sum out over final distribution - weighted sums
-        k_hat = torch.sum(output_distribution*k_c, dim=-1)
+        k_hat = torch.sum(gmm, dim=-1)
         
-        loss = torch.mean(-torch.log(self.sigma_one) * self.sigma_one**(-2*t) * (discretised_data - k_hat)**2)
+        # Shape-> B*D
+        diff = (discretised_data - k_hat).pow(2)
+        # Shape-> scalar, then B*1, B*D
+        loss = -safe_log(self.sigma_one) * self.sigma_one.pow(-2*t) * diff
+        loss = torch.mean(loss)
 
         return loss
     
@@ -154,6 +137,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         prior_mu = torch.zeros(bs, self.d)
         prior_precision = torch.ones(bs, self.d)
 
+        prior_tracker = torch.zeros(bs, self.d, 2, n_steps+1)
         # iterate over n_steps
         for i in range(1, n_steps+1):
 
@@ -167,7 +151,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
 
             # SHAPE B
-            alpha = self.sigma_one**( (-2*i) / n_steps ) * (1 - self.sigma_one**(-2/n_steps))
+            alpha = self.sigma_one**( (-2*i) / n_steps ) * (1 - self.sigma_one**(2/n_steps))
 
             # sample from y distribution centered around 'k centers'
             eps = torch.randn(bs).unsqueeze(-1)
@@ -178,6 +162,8 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             y_sample = mean + std * eps
 
             # update our prior precisions and means w.r.t to our new sample
+            prior_tracker[:, :, 0, i] = prior_mu
+            prior_tracker[:, :, 1, i] = prior_precision
             prior_mu = (prior_precision*prior_mu + alpha*y_sample) / (prior_precision + alpha)
             prior_precision = alpha + prior_precision
     
@@ -187,7 +173,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         # SHAPE B x D
         output_mean = torch.sum(output_distribution*k_centers, dim=-1)
 
-        return output_mean
+        return output_mean, prior_tracker
 
 def right_pad_dims_to(x, t):
     padding_dims = x.ndim - t.ndim
@@ -195,6 +181,11 @@ def right_pad_dims_to(x, t):
         return t
     return t.view(*t.shape, *((1,) * padding_dims))
 
+def safe_log(data: Tensor):
+    return data.clamp(min=CONST_log_min).log()
+
+def safe_exp(data: Tensor):
+    return data.clamp(min=-CONST_exp_range, max=CONST_exp_range).exp()
 
 
 
@@ -250,3 +241,24 @@ def right_pad_dims_to(x, t):
     # def estimate_e_hat(self, output_distribution):
     #     # !!! QUESTION !!! do you use ground truth to select this probability? e.g. if probs for datapoint 1 are [0.1, 0.9] and ground truth is [0, 1], do you use 0.9?
     #     return output_distribution
+
+    # def vectorised_cdf(self, mu, sigma, x):
+
+    #     # ensure shapes align for correct broadcasting
+    #     mu = mu.unsqueeze(-1)  # Shape: [B, D, 1]
+    #     sigma = sigma.unsqueeze(-1)  # Shape: [B, D, 1]
+    #     x = x.unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, K]
+    #     assert mu.dim() == sigma.dim() == x.dim()
+
+    #     cdf_func = 0.5 * (1 + torch.erf((x - mu) / (sigma * torch.sqrt(torch.tensor(2.0)))))
+    #     cdf_func = torch.clip(cdf_func, -1, 1)
+
+    #     # Apply conditions directly without squeezing, using broadcasting
+    #     # lower_mask = x < -1
+    #     # upper_mask = x > 1
+
+    #     # # Apply masks
+    #     # cdf_func = torch.where(lower_mask, torch.zeros_like(cdf_func), cdf_func)
+    #     # cdf_func = torch.where(upper_mask, torch.ones_like(cdf_func), cdf_func)
+
+    #     return cdf_func
