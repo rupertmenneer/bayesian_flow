@@ -138,7 +138,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         for i in range(1, n_steps+1):
 
             # SHAPE B,1 time is set to fraction from 
-            t = (i-1)/n_steps
+            t = self.get_time_at_t((i-1)/n_steps, bs=bs)
             # SHAPE B,1
             # gamma = self.get_gamma_t(t)
 
@@ -146,7 +146,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=(1-self.sigma_one.pow(2*t)))
 
             # SHAPE scalar
-            alpha = self.sigma_one.pow((-2*i)/n_steps ) * (1 - self.sigma_one.pow(2/n_steps))
+            alpha = self.get_alpha(i, n_steps)
 
             # sample from y distribution centered around 'k centers'
 
@@ -161,10 +161,12 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             prior_tracker[:, :, 1, i] = prior_precision
 
             # SHAPE B x D
-            prior_mu = (prior_precision*prior_mu.squeeze() + alpha*y_sample) / (prior_precision + alpha)
+            # prior_mu = (prior_precision*prior_mu.squeeze() + alpha*y_sample) / (prior_precision + alpha)
+            # prior_mu = prior_mu.unsqueeze(1)
+            # # shape scalar
+            # prior_precision = alpha + prior_precision
+            prior_mu, prior_precision = self.update_input_params((prior_mu.squeeze(), prior_precision), y_sample, alpha)
             prior_mu = prior_mu.unsqueeze(1)
-            # shape scalar
-            prior_precision = alpha + prior_precision
     
         # final pass of our distribution through the model to get final predictive distribution
         output_distribution = self.discretised_output_distribution(prior_mu, torch.ones_like(t), gamma=(1-self.sigma_one.pow(2)))
@@ -172,6 +174,17 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         output_mean = torch.sum(output_distribution*self.k_centers, dim=-1)
 
         return output_mean, prior_tracker
+    
+    def get_alpha(self, i, n_steps, min_variance: float = 1e-6):
+        sigma_1 = math.sqrt(min_variance)
+        return (sigma_1 ** (-2 * i / n_steps)) * (1 - sigma_1 ** (2 / n_steps))
+    
+    def update_input_params(self, input_params, y, alpha):
+        input_mean, input_precision = input_params
+        new_precision = input_precision + alpha
+        new_mean = ((input_precision * input_mean) + (alpha * y)) / new_precision
+        # print(y.shape, new_mean.shape, new_precision.shape, input_mean.shape, input_precision.shape)
+        return new_mean, new_precision
 
 def right_pad_dims_to(x, t):
     padding_dims = x.ndim - t.ndim
