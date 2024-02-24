@@ -18,6 +18,11 @@ class SimpleNeuralNetworkDiscretised(nn.Module):
             nn.Linear(hidden_dim, 2)
         )
 
+        # Initialize the weights using Xavier initialization
+        for layer in self.layers:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+
     def forward(self, input):
 
         """
