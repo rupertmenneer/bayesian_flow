@@ -7,11 +7,8 @@ import math
 import torch.distributions as dist
 import time
 
-CONST_log_range = 20
 CONST_log_min = 1e-10
-CONST_summary_rescale = 10
 CONST_exp_range = 10
-CONST_min_std_dev = math.exp(-CONST_exp_range)
 
 class BayesianFlowNetworkDiscretised(nn.Module):
     """
@@ -56,25 +53,14 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         return ((2 * k_ - 1)/self.k) - 1
 
     def forward(self, mu, t):
-
-        start_time = time.time()
-
-
-
         # Shape-> B*(D+1) concatenate time onto the means
         input = torch.cat((mu, t), dim=-1)
+
         # run this through the model
-        # print(f"Input: {input}")
         output = self.model(input)
-        # print(f"Input: {output}")
+
         # Shape-> B*D*2, split the output into the mean and log variance
         mean, log_var = torch.split(output, 1, dim=-1)
-
-        # Your first bit of code here
-        first_bit_duration = time.time() - start_time
-
-
-        # print(f"Network duration: {first_bit_duration}")
 
         return mean.squeeze(-1), log_var.squeeze(-1)
 
@@ -83,12 +69,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         # input is B x D one for each mean
 
         # run the samples through the model -> B x D x 2
-        # print("mu input", mu, "t", t)
-        # print(torch.isnan(mu).any(), torch.isnan(t).any())
-
         mu_eps, ln_sigma_eps = self.forward(mu, t)
-        # print("mu_eps", mu_eps[:10], "ln_sigma_eps", ln_sigma_eps[:10])
-        # print(torch.isnan(mu_eps).any(), torch.isnan(ln_sigma_eps).any())
         var_scale = torch.sqrt((1-gamma)/gamma)
         # update w.r.t noise predictions
         mu_x = (mu/gamma) - (var_scale * mu_eps)
@@ -99,7 +80,6 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         sigma_x = torch.where(t < t_min, torch.ones_like(sigma_x), sigma_x)
 
         # # Calculate the discretised output distribution u.to(self.device)sing vectorized operations
-        # print("mu", mu_x[:10], "sigma", sigma_x[:10])
         normal_dist = dist.Normal(mu_x, sigma_x)
         cdf_values_lower = normal_dist.cdf(self.k_lower)
         # ensure first bin has area 0
@@ -126,46 +106,22 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         eps = torch.randn_like(discretised_data).to(self.device)
         sender_mu_sample = (discretised_data*gamma) + (std * eps)
 
-        start_time = time.time()
-
         # Shape-> B*D*K bins pass the noisy samples to the model, output a continuous distribution and rediscretise it
         output_distribution = self.discretised_output_distribution(sender_mu_sample, t=t, gamma=gamma)
 
-        # Your first bit of code here
-        first_bit_duration = time.time() - start_time
-        # print(f"Output dist duration: {first_bit_duration}")
-
-        # print('output_distribution', output_distribution.shape)
         gmm = output_distribution*self.k_centers
         # Shape-> B*D sum out over final distribution - weighted sums
         k_hat = torch.sum(gmm, dim=-1).view(-1, 1)
 
         # Shape-> B*D
         diff = (discretised_data - k_hat).pow(2)
-        # print('diff', diff.shape)
-        # Shape-> scalar, then B*1, B*D
-        # posterior_var = self.sigma_one.pow(t)
-
-        # posterior_var = torch.pow(self.bayesian_flow.min_variance, t)
-        # flat_target = data.flatten(start_dim=1)
-        # pred_dist = self.distribution_factory.get_dist(output_params, input_params, t)
-        # pred_mean = pred_dist.mean
-        # mse_loss = (pred_mean - flat_target).square()
-        # if self.min_loss_variance > 0:
-        #     posterior_var = posterior_var.clamp(min=self.min_loss_variance)
-        # loss = self.C * mse_loss / posterior_var
-        # if min_loss_variance > 0:
-        #     posterior_var = posterior_var.clamp(min=min_loss_variance)
-
-        # loss = -0.5 * safe_log(self.sigma_one) * posterior_var * diff
         loss = -safe_log(self.sigma_one) * self.sigma_one.pow(-2*t) * diff
         loss = torch.mean(loss)
-
-
 
         return loss
 
     # algorithm 9
+    @torch.inference_mode()
     def sample_generation_for_discretised_data(self, bs=64, n_steps=20):
 
         # initialise prior with uniform distribution
@@ -178,8 +134,6 @@ class BayesianFlowNetworkDiscretised(nn.Module):
 
             # SHAPE B,1 time is set to fraction from
             t = self.get_time_at_t((i-1)/n_steps, bs=bs)
-            # SHAPE B,1
-            # gamma = self.get_gamma_t(t)
 
             # B x D x K
             output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=(1-self.sigma_one.pow(2*t)))
@@ -188,7 +142,6 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             alpha = self.get_alpha(i, n_steps)
 
             # sample from y distribution centered around 'k centers'
-
             # B, 1
             eps = torch.randn(bs).to(self.device)
             # SHAPE B x D
@@ -200,29 +153,24 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             prior_tracker[:, :, 1, i] = prior_precision
 
             # SHAPE B x D
-            # prior_mu = (prior_precision*prior_mu.squeeze() + alpha*y_sample) / (prior_precision + alpha)
-            # prior_mu = prior_mu.unsqueeze(1)
-            # # shape scalar
-            # prior_precision = alpha + prior_precision
             prior_mu, prior_precision = self.update_input_params((prior_mu.squeeze(), prior_precision), y_sample, alpha)
             prior_mu = prior_mu.unsqueeze(1)
 
+        # B x D x K
         # final pass of our distribution through the model to get final predictive distribution
         output_distribution = self.discretised_output_distribution(prior_mu, torch.ones_like(t), gamma=(1-self.sigma_one.pow(2)))
-        # SHAPE B x D
+        # SHAPE B x D 
         output_mean = torch.sum(output_distribution*self.k_centers, dim=-1)
 
         return output_mean, prior_tracker
 
-    def get_alpha(self, i, n_steps, min_variance: float = 1e-6):
+    def get_alpha(self, i, n_steps):
         return (self.sigma_one ** (-2 * i / n_steps)) * (1 - self.sigma_one ** (2 / n_steps))
-        # 1 - self.sigma_one.pow(2*t)
 
     def update_input_params(self, input_params, y, alpha):
         input_mean, input_precision = input_params
         new_precision = input_precision + alpha
         new_mean = ((input_precision * input_mean) + (alpha * y)) / new_precision
-        # print(y.shape, new_mean.shape, new_precision.shape, input_mean.shape, input_precision.shape)
         return new_mean, new_precision
 
 def right_pad_dims_to(x, t):
