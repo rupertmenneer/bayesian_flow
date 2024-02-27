@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from torch import Tensor
 import math
 import torch.distributions as dist
+import time
 
 CONST_log_range = 20
 CONST_log_min = 1e-10
@@ -32,27 +33,34 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         self.k = k
         self.d = 1
         self.model = model
+        # min_variance = 1e-6
         self.sigma_one = torch.tensor(sigma_one, device=device)
+        # self.sigma_one = torch.tensor(math.sqrt(min_variance), device=device) 
         # Calculate the lower and upper bounds for all bins -> shape: K,
         self.k_centers = self.get_k_centers()
         self.k_lower = self.k_centers - (1/self.k)
         self.k_upper = self.k_centers + (1/self.k)
-        
+
 
     def get_gamma_t(self, t):
         return 1 - self.sigma_one.pow(2*t)
 
     def sample_t_uniformly(self, n):
         return torch.rand((n, 1), device=self.device)
-    
+
     def get_time_at_t(self, t, bs):
         return torch.tensor(t, device=self.device).repeat(bs).unsqueeze(1)
-    
+
     def get_k_centers(self):
         k_ = torch.linspace(1, self.k, self.k, device=self.device)
         return ((2 * k_ - 1)/self.k) - 1
-        
+
     def forward(self, mu, t):
+
+        start_time = time.time()
+
+
+
         # Shape-> B*(D+1) concatenate time onto the means
         input = torch.cat((mu, t), dim=-1)
         # run this through the model
@@ -61,6 +69,13 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         # print(f"Input: {output}")
         # Shape-> B*D*2, split the output into the mean and log variance
         mean, log_var = torch.split(output, 1, dim=-1)
+
+        # Your first bit of code here
+        first_bit_duration = time.time() - start_time
+
+
+        # print(f"Network duration: {first_bit_duration}")
+
         return mean.squeeze(-1), log_var.squeeze(-1)
 
     def discretised_output_distribution(self, mu, t, gamma, t_min=1e-6, min_variance=1e-6):
@@ -97,7 +112,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
 
         return discretised_output_dist
 
-    def continuous_time_loss_for_discretised_data(self, discretised_data):
+    def continuous_time_loss_for_discretised_data(self, discretised_data, min_loss_variance=-1):
 
         # Shape-> B*D data is samples from the discretised distribution
 
@@ -107,27 +122,49 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         gamma = self.get_gamma_t(t)
 
         # Shape-> B*D from the discretised data, create noisy sender sample from a normal centered around data and known variance
-        std = gamma*(1-gamma)
-        eps = torch.randn_like(discretised_data, device=self.device)
+        std = torch.sqrt(gamma*(1-gamma))
+        eps = torch.randn_like(discretised_data).to(self.device)
         sender_mu_sample = (discretised_data*gamma) + (std * eps)
+
+        start_time = time.time()
 
         # Shape-> B*D*K bins pass the noisy samples to the model, output a continuous distribution and rediscretise it
         output_distribution = self.discretised_output_distribution(sender_mu_sample, t=t, gamma=gamma)
+
+        # Your first bit of code here
+        first_bit_duration = time.time() - start_time
+        # print(f"Output dist duration: {first_bit_duration}")
 
         # print('output_distribution', output_distribution.shape)
         gmm = output_distribution*self.k_centers
         # Shape-> B*D sum out over final distribution - weighted sums
         k_hat = torch.sum(gmm, dim=-1).view(-1, 1)
-        
+
         # Shape-> B*D
         diff = (discretised_data - k_hat).pow(2)
         # print('diff', diff.shape)
         # Shape-> scalar, then B*1, B*D
+        # posterior_var = self.sigma_one.pow(t)
+
+        # posterior_var = torch.pow(self.bayesian_flow.min_variance, t)
+        # flat_target = data.flatten(start_dim=1)
+        # pred_dist = self.distribution_factory.get_dist(output_params, input_params, t)
+        # pred_mean = pred_dist.mean
+        # mse_loss = (pred_mean - flat_target).square()
+        # if self.min_loss_variance > 0:
+        #     posterior_var = posterior_var.clamp(min=self.min_loss_variance)
+        # loss = self.C * mse_loss / posterior_var
+        # if min_loss_variance > 0:
+        #     posterior_var = posterior_var.clamp(min=min_loss_variance)
+
+        # loss = -0.5 * safe_log(self.sigma_one) * posterior_var * diff
         loss = -safe_log(self.sigma_one) * self.sigma_one.pow(-2*t) * diff
         loss = torch.mean(loss)
 
+
+
         return loss
-    
+
     # algorithm 9
     def sample_generation_for_discretised_data(self, bs=64, n_steps=20):
 
@@ -139,7 +176,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         # iterate over n_steps
         for i in range(1, n_steps+1):
 
-            # SHAPE B,1 time is set to fraction from 
+            # SHAPE B,1 time is set to fraction from
             t = self.get_time_at_t((i-1)/n_steps, bs=bs)
             # SHAPE B,1
             # gamma = self.get_gamma_t(t)
@@ -153,13 +190,13 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             # sample from y distribution centered around 'k centers'
 
             # B, 1
-            eps = torch.randn(bs, device=self.device)
+            eps = torch.randn(bs).to(self.device)
             # SHAPE B x D
             mean = torch.sum(output_distribution*self.k_centers, dim=-1)
-            y_sample = mean + ((1/alpha) * eps)
+            y_sample = mean + (torch.sqrt((1/alpha)) * eps)
 
             # update our prior precisions and means w.r.t to our new sample
-            prior_tracker[:, :, 0, i] = prior_mu
+            prior_tracker[:, :, 0, i] = y_sample.unsqueeze(1)
             prior_tracker[:, :, 1, i] = prior_precision
 
             # SHAPE B x D
@@ -169,18 +206,18 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             # prior_precision = alpha + prior_precision
             prior_mu, prior_precision = self.update_input_params((prior_mu.squeeze(), prior_precision), y_sample, alpha)
             prior_mu = prior_mu.unsqueeze(1)
-    
+
         # final pass of our distribution through the model to get final predictive distribution
         output_distribution = self.discretised_output_distribution(prior_mu, torch.ones_like(t), gamma=(1-self.sigma_one.pow(2)))
         # SHAPE B x D
         output_mean = torch.sum(output_distribution*self.k_centers, dim=-1)
 
         return output_mean, prior_tracker
-    
+
     def get_alpha(self, i, n_steps, min_variance: float = 1e-6):
-        sigma_1 = math.sqrt(min_variance)
-        return (sigma_1 ** (-2 * i / n_steps)) * (1 - sigma_1 ** (2 / n_steps))
-    
+        return (self.sigma_one ** (-2 * i / n_steps)) * (1 - self.sigma_one ** (2 / n_steps))
+        # 1 - self.sigma_one.pow(2*t)
+
     def update_input_params(self, input_params, y, alpha):
         input_mean, input_precision = input_params
         new_precision = input_precision + alpha
@@ -199,79 +236,3 @@ def safe_log(data: Tensor):
 
 def safe_exp(data: Tensor):
     return data.clamp(min=-CONST_exp_range, max=CONST_exp_range).exp()
-
-
-
-
-
-    #  def accuracy_schedule(self, t):
-    #     if t == 0:
-    #         return torch.tensor(0).unsqueeze(1)
-    #     return (self.sigma_one**(-2*t) - 1).unsqueeze(1)
-    
-    # def accuracy_rate(self, t):
-    #     return (2*torch.log(self.sigma_one)) / (self.sigma_one**(2*t))
-    
-    # def bayesian_update(self, mean_0, precision_0, mean_1, precision_1):
-    #     new_precision = precision_0 + precision_1
-    #     new_mean = (mean_0 * precision_0 + mean_1 * precision_1) / new_precision
-    #     return new_mean, new_precision
-
-
-
-
-    # # algorithm 8 line 3 sample from sender distribution
-    # def get_sender_distribution_sample(self, beta, e_x):
-    #     # mean is the noise scaled ground truth one hot vector - also scaled by the number of classes K
-    #     mean = beta * ((self.k * e_x) - 1) 
-    #     # std is a function of the noise and number of classes, covariance is identity (e.g. independence assumption)
-    #     # !!! interestingly we don't need the idenity here - I guess its simply modeled as independent vectors? not sure when you would need the identity
-    #     std = torch.sqrt(beta * self.k)
-    #     # sample random noise so we can sample from the sender
-    #     eps = torch.randn(e_x.shape[1])
-    #     return mean + std * eps
-
-    # # algorithm 8 line 4
-    # def bayesian_update_of_theta(self, y):
-    #     return F.softmax(y, dim=1)
-
-    # # their pseudo function in section 6.13
-    # def discrete_output_distribution(self, theta, t):
-    #     # pass all theta and time into model
-    #     output_distribution = self(theta, t)
-    #     # ensure output is valid probability distribution
-    #     if self.k == 2:
-    #         # is this really necessary? don't softmax and sigmoid give same results
-    #         output_distribution = torch.sigmoid(output_distribution)
-    #         output_k_2 = 1. - output_distribution
-    #         output_distribution= torch.cat((output_distribution, output_k_2), dim=-1)
-    #     else:
-    #         output_distribution = F.softmax(output_distribution, axis=1)
-            
-    #     return output_distribution
-    
-    # # since one_hot we can just return exactly? the probability for class K in this case its equivalent
-    # def estimate_e_hat(self, output_distribution):
-    #     # !!! QUESTION !!! do you use ground truth to select this probability? e.g. if probs for datapoint 1 are [0.1, 0.9] and ground truth is [0, 1], do you use 0.9?
-    #     return output_distribution
-
-    # def vectorised_cdf(self, mu, sigma, x):
-
-    #     # ensure shapes align for correct broadcasting
-    #     mu = mu.unsqueeze(-1)  # Shape: [B, D, 1]
-    #     sigma = sigma.unsqueeze(-1)  # Shape: [B, D, 1]
-    #     x = x.unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, K]
-    #     assert mu.dim() == sigma.dim() == x.dim()
-
-    #     cdf_func = 0.5 * (1 + torch.erf((x - mu) / (sigma * torch.sqrt(torch.tensor(2.0)))))
-    #     cdf_func = torch.clip(cdf_func, -1, 1)
-
-    #     # Apply conditions directly without squeezing, using broadcasting
-    #     # lower_mask = x < -1
-    #     # upper_mask = x > 1
-
-    #     # # Apply masks
-    #     # cdf_func = torch.where(lower_mask, torch.zeros_like(cdf_func), cdf_func)
-    #     # cdf_func = torch.where(upper_mask, torch.ones_like(cdf_func), cdf_func)
-
-    #     return cdf_func
