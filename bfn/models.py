@@ -1,19 +1,24 @@
 import torch
 import torch.nn as nn
 
+import torch
+import torch.nn as nn
+
 class SimpleNeuralNetworkDiscretised(nn.Module):
 
-    def __init__(self, d = 1, hidden_dim = 8):
+    def __init__(self, d = 1, hidden_dim = 32):
         super(SimpleNeuralNetworkDiscretised, self).__init__()
 
         # Define the number of output classes based on K
         self.d = d
 
-        # feed forward layers 
+        # feed forward layers
         self.layers = nn.Sequential(
             # input is number of class vectors K with dimensionality D, +1 dim for time
             nn.Linear(d+1, hidden_dim),
-            nn.GELU(),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
             # output is number of class vectors K or 1 in case of binary task with dimensionality D
             nn.Linear(hidden_dim, 2)
         )
@@ -27,22 +32,23 @@ class SimpleNeuralNetworkDiscretised(nn.Module):
 
         """
         Forward pass of simple neural net. Takes input tensor, vecotorizes and concatenates with time, then passes through feed forward layers.
-        
+
         Parameters
         ----------
         theta : torch.Tensor
             Tensor of shape (B, D,).
         t : torch.Tensor
             Tensor of shape (B,).
-        
+
         Returns
         -------
         torch.Tensor
             Output tensor of shape (B, D, 2).
         """
-        output = self.layers(input)  # (B, D)
+        output = self.layers(input)  # (B, D+1)
         output = output.view(output.shape[0], self.d, 2) # (B, D, 2)
         return output
+
 
 class SimpleNeuralNetworkDiscrete(nn.Module):
 
