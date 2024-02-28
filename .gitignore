@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+wandb
 
 # datasets
 cifar-10-batches-py/
