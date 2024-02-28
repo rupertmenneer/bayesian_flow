@@ -28,7 +28,7 @@ class SimpleNeuralNetworkDiscretised(nn.Module):
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_uniform_(layer.weight)
 
-    def forward(self, input):
+    def forward(self, input, t):
 
         """
         Forward pass of simple neural net. Takes input tensor, vecotorizes and concatenates with time, then passes through feed forward layers.
@@ -45,6 +45,7 @@ class SimpleNeuralNetworkDiscretised(nn.Module):
         torch.Tensor
             Output tensor of shape (B, D, 2).
         """
+        input = torch.cat((input, t), dim=-1)
         output = self.layers(input)  # (B, D+1)
         output = output.view(output.shape[0], self.d, 2) # (B, D, 2)
         return output
