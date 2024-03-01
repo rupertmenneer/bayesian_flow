@@ -49,7 +49,6 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         assert (k >= 2)
         self.device = device
         self.k = k
-        self.d = 1
         self.model = model
         self.sigma_one = torch.tensor(sigma_one, device=device)
 
@@ -78,6 +77,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
     def forward(self, mu: Tensor, t: Tensor) -> Tuple[Tensor, Tensor]:
         # Shape -> Tensor[B, D, 2], Tensor [B] run current estimate of mu and the time through the learnable model
         output = self.model(mu, t)
+        # print('Model output:', output.shape)
         # Shape -> Tensor[B, D, 2], split the output into the mean and log variance
         mean, log_var = torch.split(output, 1, dim=-1)
         return mean.squeeze(-1), log_var.squeeze(-1)
@@ -102,10 +102,12 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         """
 
         # run the samples through the model to get prediction of mean and log(sigma) of noise -> Tensor[B, D, 2]
+        # print('Model inputs:', mu.shape, t.shape)
         mu_eps, ln_sigma_eps = self.forward(mu, t)
 
         # update prediction of data w.r.t noise predictions
         var_scale = torch.sqrt((1-gamma)/gamma)
+        # print("Mu", mu.shape, 'gamma', gamma.shape, 'var_scale', var_scale.shape, 'mu_eps', mu_eps.shape, 'ln_sigma_eps', ln_sigma_eps.shape)
         mu_x = (mu/gamma) - (var_scale * mu_eps)
         sigma_x = torch.clamp(var_scale * safe_exp(ln_sigma_eps), self.sigma_one)
 
@@ -114,16 +116,21 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         sigma_x = torch.where(t < t_min, torch.ones_like(sigma_x), sigma_x)
 
         # Calculate the discretised output distribution using vectorized operations
+        # print("Mu_x", mu_x.shape, 'sigma_x', sigma_x.shape, 'k_lower', self.k_lower.shape, 'k_upper', self.k_upper.shape)
         normal_dist = dist.Normal(mu_x, sigma_x)
-        cdf_values_lower = normal_dist.cdf(self.k_lower)
-        cdf_values_upper = normal_dist.cdf(self.k_upper)
+        broadcasted_k_lower = self.k_lower.repeat(mu_x.shape[1], mu_x.shape[0], 1).transpose(0, 2)
+        broadcast_k_upper = self.k_upper.repeat(mu_x.shape[1], mu_x.shape[0], 1).transpose(0, 2)
+        cdf_values_lower = normal_dist.cdf(broadcasted_k_lower)
+        cdf_values_upper = normal_dist.cdf(broadcast_k_upper)
 
         # make sure the lower cdf is bounded at 0 and the upper cdf at 1, this has the effect of clipping the distribution (see eq 108) and ensures the total sums to 1
-        cdf_values_lower = torch.where(self.k_lower<=-1, torch.zeros_like(cdf_values_lower), cdf_values_lower)
-        cdf_values_upper = torch.where(self.k_upper>=1, torch.ones_like(cdf_values_upper), cdf_values_upper)
+        cdf_values_lower = torch.where(broadcasted_k_lower<=-1, torch.zeros_like(cdf_values_lower), cdf_values_lower)
+        cdf_values_upper = torch.where(broadcast_k_upper>=1, torch.ones_like(cdf_values_upper), cdf_values_upper)
 
         # calculate area in each bin
-        discretised_output_dist = cdf_values_upper - cdf_values_lower
+        discretised_output_dist = (cdf_values_upper - cdf_values_lower).permute(1, 2, 0)
+
+        # print(discretised_output_dist.shape, 'discretised_output_dist')
 
         return discretised_output_dist
 
@@ -147,9 +154,13 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         # Shape-> Tensor[B, D] data is samples from the discretised distribution
 
         batch_size = discretised_data.shape[0]
+        # flatten data, this makes data that may be 2d such as images Tensor[B, H, W] to flat Tensor[B, H*W]
+        discretised_data = discretised_data.view(batch_size, -1)
+
+
         # time, gamma -> Tensor[B, 1]
-        t = self.sample_t_uniformly(batch_size)
-        gamma = self.get_gamma_t(t)
+        t = right_pad_dims_to(self.sample_t_uniformly(batch_size), discretised_data)
+        gamma = right_pad_dims_to(self.get_gamma_t(t), discretised_data)
 
         # Shape-> Tensor[B, D] from the discretised data, create noisy sender sample from a normal centered around data and known variance
         std = torch.sqrt(gamma*(1-gamma))
@@ -160,8 +171,10 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         output_distribution = self.discretised_output_distribution(sender_mu_sample, t=t, gamma=gamma)
 
         gmm = output_distribution*self.k_centers
+
         # Shape-> Tensor[B, D] sum out over final distribution - weighted sums
-        K_hat = torch.sum(gmm, dim=-1).view(-1, 1)
+        K_hat = torch.sum(gmm, dim=-1).view(batch_size, -1)
+
 
         # Shape-> Tensor[B, D]
         diff = (discretised_data - K_hat).pow(2)
@@ -172,7 +185,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         return loss
 
     @torch.inference_mode()
-    def sample_generation_for_discretised_data(self, bs:int = 64, n_steps:int = 50):
+    def sample_generation_for_discretised_data(self, sample_shape:tuple = (8, 32, 32, 3), n_steps:int = 50):
         """
         Generates new discretised samples using the Bayesian flow model.
         Sample generation algorithm 6 page 26.
@@ -186,21 +199,25 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             prior_tracker (torch.Tensor): Prior distribution tracker over time. Shape: [B, D, 2, n_steps+1]
         """
 
+        bs = sample_shape[0]
+
         # initialise prior with a standard normal distribution ~ N(0, 1)
-        prior_mu = torch.zeros(bs, self.d)
-        prior_precision = torch.tensor(1)
+        prior_mu = torch.zeros(sample_shape, device=self.device).view(bs, -1)
+        prior_precision = torch.tensor(1, device=self.device)
+        d = prior_mu.shape[1]
 
         # tracks prior distribution over time (mean and var)
-        prior_tracker = torch.zeros(bs, self.d, 2, n_steps+1)
+        prior_tracker = torch.zeros(bs, d, 2, n_steps+1)
 
         # iterate over n_steps
         for i in range(1, n_steps+1):
 
             # Tensor[B, 1] time is a linear step from 0 to 1, a fraction based off current time
-            t = self.get_time_at_t((i-1)/n_steps, bs=bs)
+            t = right_pad_dims_to(self.get_time_at_t((i-1)/n_steps, bs=bs), prior_mu)
+            gamma = right_pad_dims_to(self.get_gamma_t(t), prior_mu)
 
             # Tensor[B, D, K]
-            output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=self.get_gamma_t(t))
+            output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
 
             # Tensor [1]
             alpha = self.get_alpha(i, n_steps)
@@ -214,17 +231,20 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             y_sample = self.get_normal_sample(mean, std)
 
             # Logging: track the prior precisions and means
-            prior_tracker[:, :, 0, i] = y_sample.unsqueeze(1)
+            prior_tracker[:, :, 0, i] = y_sample
             prior_tracker[:, :, 1, i] = prior_precision
 
             # Tensor[B, D] - updated prior distribution based off new estimates
             prior_mu, prior_precision = self.update_prior_distribution(prior_mu, prior_precision, y_sample, alpha)
 
         # Tensor[B, D, K] final pass of our distribution through the model to get final predictive distribution
-        t = torch.ones_like(t)
-        output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=self.get_gamma_t(t))
+        t = right_pad_dims_to(torch.ones_like(t), prior_mu)
+        gamma = right_pad_dims_to(self.get_gamma_t(t), prior_mu)
+        output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
         # Tensor[B, D] 
         output_mean = torch.sum(output_distribution*self.k_centers, dim=-1)
+        # final reshape back into requested sample shape
+        output_mean = output_mean.view(sample_shape)
 
         return output_mean, prior_tracker
 
@@ -236,12 +256,18 @@ class BayesianFlowNetworkDiscretised(nn.Module):
     def update_prior_distribution(self, prior_mean: Tensor, prior_precision: Tensor, y: Tensor, alpha: float) -> Tuple[Tensor, Tensor]:
         new_precision = prior_precision + alpha
         new_mean = ((prior_precision * prior_mean.squeeze()) + (alpha * y)) / new_precision
-        return new_mean.unsqueeze(-1), new_precision
+        return new_mean, new_precision
     
     # given a mean and std, samples from a normal distribution with random noise of shape mean
     def get_normal_sample(self, mu: Tensor, std: Tensor) -> Tensor:
         eps = torch.randn_like(mu).to(self.device)
         return mu + (std * eps)
+
+def right_pad_dims_to(input_tensor, target_shape):
+    padding_dims = target_shape.ndim - input_tensor.ndim
+    if padding_dims <= 0:
+        return input_tensor
+    return input_tensor.view(*input_tensor.shape, *((1,) * padding_dims))
 
 def safe_log(data: Tensor):
     return data.clamp(min=CONST_log_min).log()
