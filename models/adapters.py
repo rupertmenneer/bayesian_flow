@@ -15,9 +15,9 @@ class FourierImageInputAdapter(nn.Module):
     def __init__(
         self,
         input_channels: int = 3,
-        input_shape: Tuple[int, int] = (224, 224),
+        input_shape: Tuple[int, int] = (32, 32),
         n_freq_bands: int = 64,
-        output_height: int = 256,
+        output_height: int = 32,
         value_res: int = -1,
         mask_res: int = -1,
         add_pos_feats: bool = True,
@@ -33,6 +33,7 @@ class FourierImageInputAdapter(nn.Module):
         self.mask_res = mask_res
         self.add_pos_feats = add_pos_feats
         self.add_mask = add_mask
+        self.input_channels = input_channels
         if learn_pos_feats:
             pos_feats = nn.Parameter(
                 init_scale
@@ -69,9 +70,14 @@ class FourierImageInputAdapter(nn.Module):
             self.output_projection = nn.Linear(all_feat_height, output_height)
 
     def forward(self, img: Tensor, t: Tensor) -> Tensor:
+        img = img.reshape(-1, *self.input_shape, self.input_channels)
+        # print(img.shape)
         flat_img = sandwich(img)
         flat_t = sandwich(t)
+        # broadcast t to the same shape as the image
+        flat_t = flat_t.expand(-1, flat_img.size(1), 1)
         t_feats = (flat_t.float()[..., :1] * 2) - 1
+
         if self.mask_res > 0:
             t_feats = torch.cat(
                 [
@@ -97,16 +103,20 @@ class FourierImageInputAdapter(nn.Module):
 
 
 class OutputAdapter(nn.Module):
-    def __init__(self, input_height: int, output_channels: int, output_height: int):
+    """
+        input_height: 131
+        output_channels: 3 # (r,g,b)
+        output_height: 2 # mean, std
+    """
+    def __init__(self, network_height: int = 160, output_channels: int = 3, n_outputs: int = 2):
         super().__init__()
         self.output_channels = output_channels
-        self.output_height = output_height
+        self.n_outputs = n_outputs
         self.output_projection = nn.Linear(
-            input_height, output_channels * output_height
+            network_height, output_channels*n_outputs
         )
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         output = self.output_projection(inp)
-        return output.reshape(
-            output.size(0), -1, self.output_channels, self.output_height
-        )
+        # output is of shape Tensor[B, D*channels, n_outputs]
+        return output.reshape(output.size(0), -1, self.n_outputs)
