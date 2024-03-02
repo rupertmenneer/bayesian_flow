@@ -51,7 +51,7 @@ class UNetVDM(nn.Module):
         n_attention_heads: int = 8,
         dropout_prob: float = 0.1,
         norm_groups: int = 32,
-        input_channels: int = 3,
+        input_channels: int = 32,
         use_fourier_features: bool = True,
         attention_everywhere: bool = False,
         image_size: int = 32,
@@ -123,6 +123,7 @@ class UNetVDM(nn.Module):
         t: torch.Tensor,
     ) -> torch.Tensor:
         flat_x = self.input_adapter(data, t)
+        # print('flat_x', flat_x.shape)
         x = flat_x.reshape(flat_x.size(0), self.image_size, self.image_size, self.input_channels)
         x_perm = x.permute(0, 3, 1, 2).contiguous()
         t = t.float().flatten(start_dim=1)[:, 0]
