@@ -23,6 +23,7 @@ class DiscretisedBFNTrainer():
                  input_height: int = 32,
                  input_channels: int = 3,
                  lr: float = 0.0002,
+                 max_lr = 0.001,
                  betas: tuple = (0.9, 0.99),
                  weight_decay: float = 0.01,
                  sigma_one: float = math.sqrt(0.001),
@@ -70,8 +71,7 @@ class DiscretisedBFNTrainer():
             self.optim = AdamW(self.bfn_model.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
         steps_per_epoch = len(self.train_dls) 
         total_steps = self.num_epochs * steps_per_epoch
-        max_lr = 0.001  # The peak learning rate
-        self.lr_sched = OneCycleLR(self.optim, max_lr, total_steps=total_steps, pct_start=0.001)
+        self.lr_sched = OneCycleLR(self.optim, max_lr, total_steps=total_steps, pct_start=0.002)
 
         # load checkpoint if provided
         if checkpoint_file is not None:
@@ -108,6 +108,8 @@ class DiscretisedBFNTrainer():
 
             # run through training batches
             for j, batch in enumerate(self.train_dls):
+
+                print(j)
                 
                 if n_test_batches != 0:
                     if j > n_test_batches:
