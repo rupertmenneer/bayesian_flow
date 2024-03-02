@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch_ema import ExponentialMovingAverage
 from models.unet_vdm import UNetVDM
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
 from discretised.bfn_discretised import BayesianFlowNetworkDiscretised
 from models.adapters import FourierImageInputAdapter, OutputAdapter
 import torch
@@ -17,7 +18,8 @@ class DiscretisedBFNTrainer():
     def __init__(self,
                  k:int = 16,
                  device: str = None,
-                 bs: int = 32,
+                 bs: int = 64,
+                 num_epochs: int = 500,
                  input_height: int = 32,
                  input_channels: int = 3,
                  lr: float = 0.0002,
@@ -33,6 +35,10 @@ class DiscretisedBFNTrainer():
         self.device = device
         self.input_height = input_height
         self.input_channels = input_channels
+        self.best_val_loss = torch.tensor(float('inf'))
+        self.step = 0
+        self.num_epochs = num_epochs
+
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
@@ -65,19 +71,36 @@ class DiscretisedBFNTrainer():
         if optimizer is None:
             self.optim = AdamW(self.bfn_model.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
 
+        steps_per_epoch = len(self.train_dls) 
+        total_steps = self.num_epochs * steps_per_epoch
+        max_lr = 0.001  # The peak learning rate
+
+        self.lr_sched = OneCycleLR(self.optim, max_lr, total_steps=total_steps, pct_start=0.02)
+
         self.wandb_project_name = wandb_project_name
         if wandb_project_name is not None:
             wandb.init(project=wandb_project_name)
 
 
-    def train(self, num_epochs: int = 10, validation_interval: int = 1, sampling_interval: int = 10, clip_grad: float = 2.0):
+    def train(self,
+              num_epochs: int = None,
+              validation_interval_epoch: int = 1,
+              sampling_interval_step: int = 250,
+              clip_grad: float = 2.0,
+              n_test_batches: int = 0):
         
-
+        if num_epochs is None:
+            num_epochs = self.num_epochs
+        
         for i in range(num_epochs):
             epoch_losses = []
 
             # run through training batches
-            for _, batch in enumerate(self.train_dls):
+            for j, batch in enumerate(self.train_dls):
+                
+                if n_test_batches != 0:
+                    if j > n_test_batches:
+                        break
 
                 self.optim.zero_grad()
 
@@ -93,22 +116,29 @@ class DiscretisedBFNTrainer():
                 self.optim.step()
                 self.ema.update()
 
+                # lr step
+                self.lr_sched.step()
+
                 # logging
                 if self.wandb_project_name is not None:
-                    wandb.log({"batch_train_loss": loss.item()})
+                    wandb.log({"batch_train_loss": loss.item(), "lr": self.optim.param_groups[0]['lr']})
 
                 epoch_losses.append(loss.item())
+
+                # Sampling stage
+                if self.step % sampling_interval_step == 0:
+                    self.sample()
+
+                # for every batch iterate
+                self.step += 1
 
             if self.wandb_project_name is not None:
                 wandb.log({"epoch_train_loss": torch.mean(torch.tensor(epoch_losses))})
 
             # Validation check
-            if (i + 1) % validation_interval == 0:
+            if i % validation_interval_epoch == 0:
                 self.validate()
 
-            # Sampling stage
-            if (i + 1) % sampling_interval == 0:
-                self.sample()
                 
             
 
@@ -122,8 +152,13 @@ class DiscretisedBFNTrainer():
             loss = self.bfn_model.continuous_time_loss_for_discretised_data(batch.to(self.device))
             val_losses.append(loss.item())
 
+        epoch_val_loss = torch.mean(torch.tensor(val_losses))
         if self.wandb_project_name is not None:
-            wandb.log({"validation_loss": torch.mean(torch.tensor(val_losses))})
+            wandb.log({"validation_loss": epoch_val_loss})
+
+        if epoch_val_loss < self.best_val_loss:
+            self.best_val_loss = epoch_val_loss
+            self.save_model()
 
 
     @torch.no_grad()
@@ -135,10 +170,12 @@ class DiscretisedBFNTrainer():
             samples, priors = self.bfn_model.sample_generation_for_discretised_data(sample_shape=sample_shape)
             samples = samples.to(torch.float32)
         
-        image_grid = get_image_grid_from_tensor(samples)
+        image_grid = get_image_grid_from_tensor(samples.transpose(1, 3))
+
         # Convert samples and priors to numpy arrays
-        image_grid = image_grid.detach().numpy()
+        image_grid = image_grid.detach().cpu().numpy()
         image_grid = np.transpose(image_grid, (2, 1, 0))
+
         # priors_np = priors.detach().numpy()
         
         # Plot histograms
@@ -147,3 +184,14 @@ class DiscretisedBFNTrainer():
             wandb.log({"image_samples": images})
 
         
+    def save_model(self, epoch, save_path: str = './bfn_model_checkpoint.pth'):
+        self.bfn_model.eval()
+
+        checkpoint = { 
+        'epoch': epoch,
+        'model': self.bfn_model.state_dict(),
+        'optimizer': self.optim.state_dict(),
+        'lr_sched': self.lr_sched}
+
+        torch.save(checkpoint, save_path)
+    

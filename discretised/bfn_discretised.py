@@ -185,7 +185,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         return loss
 
     @torch.inference_mode()
-    def sample_generation_for_discretised_data(self, sample_shape:tuple = (8, 32, 32, 3), n_steps:int = 50):
+    def sample_generation_for_discretised_data(self, sample_shape:tuple = (8, 32, 32, 3), n_steps:int = 100):
         """
         Generates new discretised samples using the Bayesian flow model.
         Sample generation algorithm 6 page 26.
