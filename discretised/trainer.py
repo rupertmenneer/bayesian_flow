@@ -19,11 +19,11 @@ class DiscretisedBFNTrainer():
                  k:int = 16,
                  device: str = None,
                  bs: int = 64,
-                 num_epochs: int = 500,
+                 num_epochs: int = 350,
                  input_height: int = 32,
                  input_channels: int = 3,
                  lr: float = 0.0002,
-                 max_lr = 0.001,
+                 max_lr = 0.0004,
                  betas: tuple = (0.9, 0.99),
                  weight_decay: float = 0.01,
                  sigma_one: float = math.sqrt(0.001),
@@ -31,7 +31,8 @@ class DiscretisedBFNTrainer():
                  optimizer: Union[None, torch.optim.Optimizer] = None,
                  dataset: str = 'cifar10',
                  wandb_project_name: str = "bayesian_flow",
-                 checkpoint_file: str = None):
+                 checkpoint_file: str = None,
+                 save_path: str = './bfn_model_checkpoint.pth'):
        
         self.k = k
         self.device = device
@@ -41,6 +42,7 @@ class DiscretisedBFNTrainer():
         self.step = 0
         self.epoch = 0
         self.num_epochs = num_epochs
+        self.save_path = save_path
 
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -71,7 +73,7 @@ class DiscretisedBFNTrainer():
             self.optim = AdamW(self.bfn_model.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
         steps_per_epoch = len(self.train_dls) 
         total_steps = self.num_epochs * steps_per_epoch
-        self.lr_sched = OneCycleLR(self.optim, max_lr, total_steps=total_steps, pct_start=0.002)
+        self.lr_sched = OneCycleLR(self.optim, max_lr, total_steps=total_steps, pct_start=0.001)
 
         # load checkpoint if provided
         if checkpoint_file is not None:
@@ -197,7 +199,7 @@ class DiscretisedBFNTrainer():
             wandb.log({"image_samples": images})
 
         
-    def save_model(self, save_path: str = '/home/rfsm2/rds/hpc-work/MLMI4/bfn_model_checkpoint.pth'):
+    def save_model(self):
         self.bfn_model.eval()
 
         checkpoint = { 
@@ -206,6 +208,6 @@ class DiscretisedBFNTrainer():
         'model': self.bfn_model.state_dict(),
         'optim': self.optim.state_dict(),
         'lr_sched': self.lr_sched}
-        print(save_path)
-        torch.save(checkpoint, save_path)
+        print(self.save_path)
+        torch.save(checkpoint, self.save_path)
     
