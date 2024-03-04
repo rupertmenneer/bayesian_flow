@@ -100,9 +100,9 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         Returns:
             torch.Tensor: The discretised output distribution. Shape: [B, D]
         """
-
+        
         # run the samples through the model to get prediction of mean and log(sigma) of noise -> Tensor[B, D, 2]
-        # print('Model inputs:', mu.shape, t.shape)
+        # print('Model inputs:', mu.shape, t.shape, gamma.shape)
         mu_eps, ln_sigma_eps = self.forward(mu, t)
 
         # update prediction of data w.r.t noise predictions
@@ -255,7 +255,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
     # update the priors based off new estimate - algorithm 6
     def update_prior_distribution(self, prior_mean: Tensor, prior_precision: Tensor, y: Tensor, alpha: float) -> Tuple[Tensor, Tensor]:
         new_precision = prior_precision + alpha
-        new_mean = ((prior_precision * prior_mean.squeeze()) + (alpha * y)) / new_precision
+        new_mean = ((prior_precision * prior_mean) + (alpha * y)) / new_precision
         return new_mean, new_precision
     
     # given a mean and std, samples from a normal distribution with random noise of shape mean
