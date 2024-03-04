@@ -115,6 +115,9 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         mu_x = torch.where(t < t_min, torch.zeros_like(mu_x), mu_x)
         sigma_x = torch.where(t < t_min, torch.ones_like(sigma_x), sigma_x)
 
+        # clip output mu to be between viable range (as mentioned in page 16 of paper)
+        mu_x = torch.clamp(mu_x, -1, 1)
+
         # Calculate the discretised output distribution using vectorized operations
         # print("Mu_x", mu_x.shape, 'sigma_x', sigma_x.shape, 'k_lower', self.k_lower.shape, 'k_upper', self.k_upper.shape)
         normal_dist = dist.Normal(mu_x, sigma_x)
@@ -182,6 +185,125 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         loss = -safe_log(self.sigma_one) * self.sigma_one.pow(-2*t) * diff
         loss = torch.mean(loss)
 
+        return loss
+
+    def discrete_time_loss_for_discretised_data(self, discretised_data: Tensor, n=25, monte_carlo_samples=10) -> Tensor:
+        """
+        Calculates the discrete time loss for discretised data. A.k.a Loss n from algorithm 4 page 26.
+
+        1) sample time from 1 to N e.g. 25, then set to be fraction of this time
+        2) set gamma to be 1-sigma_one^2*t
+        3) create an estimate for the mean of the sender sample (this is noisy) µ ~ N(gamma*x, gamma(1-gamma))
+        4) pass the noisy samples to the model, output a continuous distribution and rediscretise it
+        5) calculate KL based loss between the discretised output distribution and the original discretised data
+
+        Args:
+            discretised_data (Tensor): Real data samples from the discretised distribution. Shape: [B, D]
+
+        Returns:
+            Tensor: Loss 'Infinity' value.
+        """
+
+        # Shape-> Tensor[B, D] data is samples from the discretised distribution
+
+        batch_size = discretised_data.shape[0]
+        # flatten data, this makes data that may be 2d such as images Tensor[B, H, W] to flat Tensor[B, H*W]
+        discretised_data = discretised_data.view(batch_size, -1)
+
+
+        # time, gamma -> Tensor[B, 1]
+        i = torch.randint(1, n, (batch_size, 1))
+        t = torch.clamp((i-1)/n, 1e-6)
+        t = right_pad_dims_to(t, discretised_data)
+        gamma = right_pad_dims_to(self.get_gamma_t(t), discretised_data)
+
+        # Shape-> Tensor[B, D] from the discretised data, create noisy sender sample from a normal centered around data and known variance
+        std = torch.sqrt(gamma*(1-gamma))
+        mean = discretised_data*gamma
+        sender_mu_sample = self.get_normal_sample(mean, std)
+
+        # Shape-> Tensor[B, D, K] bins pass the noisy samples to the model, output a continuous distribution and rediscretise it
+        output_distribution = self.discretised_output_distribution(sender_mu_sample, t=t, gamma=gamma)
+
+        # calculate alpha
+        alpha = self.sigma_one.pow(-2*(i/n)) * (1 - self.sigma_one.pow(2/n))
+
+        # Monte Carlo sampling from the sender
+        y_sender_distribution = dist.Normal(discretised_data, torch.sqrt(1/alpha))
+        y_sender_samples = y_sender_distribution.sample(torch.Size([n]))
+        # print(y_sender_samples.shape)
+
+        # Preparing the receiver distribution
+        # receiver_mix_dist = dist.Categorical(probs=output_distribution, validate_args=False)
+        # receiver_components = dist.Normal(
+        #     self.k_centers, (1.0 / alpha.sqrt()).unsqueeze(-1), validate_args=False
+        # )
+        # receiver_dist = dist.MixtureSameFamily(receiver_mix_dist, receiver_components, validate_args=False)
+        receiver_mix_dist = dist.Categorical(probs=output_distribution)
+        receiver_components = dist.Normal(self.k_centers, torch.sqrt(1/alpha).unsqueeze(-1))
+        receiver_dist = dist.MixtureSameFamily(receiver_mix_dist, receiver_components)
+
+        # receiver_mix_dist = dist.Categorical(probs=output_distribution, validate_args=False)
+        # Creating a mixture distribution for the receiver
+        
+        
+
+        # Calculating the loss using Monte Carlo samples
+        # log_prob_y_sender = y_sender_distribution.log_prob(y_sender_samples)
+        # log_prob_y_receiver = torch.sum(receiver_dist.log_prob(y_sender_samples), dim=-1)
+
+        loss = (
+            (y_sender_distribution.log_prob(y_sender_samples) - receiver_dist.log_prob(y_sender_samples))
+            .mean(0)
+            .flatten(start_dim=1)
+            .mean(1, keepdims=True)
+        )
+
+        # print('log_prob_y_sender', log_prob_y_sender.shape, 'log_prob_y_receiver', log_prob_y_receiver.shape)
+        # loss = (log_prob_y_sender - log_prob_y_receiver).mean()
+        # print(loss)
+
+        # # Tensor[N, B, D] monte carlo sampling - take n samples from the sender
+        # y_sender_distribution = dist.Normal(discretised_data, torch.sqrt(1/alpha))
+        # y_sender_samples = y_sender_distribution.sample(torch.Size([n]))
+
+        # # print('y_sender_samples', y_sender_samples.shape, 'output_distribution', output_distribution.shape, self.k_centers.shape)
+
+        # # receiver distribution is a GMM centered around the K beans, weighted by output distribution
+        # # we want K centers to be broadcasted over batch to be [B, D, K]
+        # broadcasted_k_center = self.k_centers.repeat(batch_size, discretised_data.shape[1], 1)
+        # # print('broadcasted_k_center', broadcasted_k_center.shape)
+        # # print('alpha', alpha.shape)
+        # # Tensor[B, D, K]
+        # k_centered_normal = self.get_normal_sample(broadcasted_k_center, right_pad_dims_to(torch.sqrt(1/alpha), broadcasted_k_center))
+        # # print('k_centered_normal', k_centered_normal.shape)
+        # # multiply the K bins [B, D, K] by output dist [B, D, K]
+        # receiver_distribution = output_distribution*k_centered_normal
+        # # print('receiver_distribution', receiver_distribution.shape)
+        # # Shape-> Tensor[B, D] sum out over final distribution - weighted sums
+        # receiver_distribution = torch.sum(receiver_distribution, dim=-1).view(batch_size, -1)
+        # # print('receiver_distribution', receiver_distribution.shape)
+        # # Shape-> Tensor[B] loss is the KL divergence between the sender and receiver (using monte carlo sampling to approximate the expectation)
+        # summed_log_receiver_distribution = right_pad_dims_to(torch.sum(safe_log(receiver_distribution), axis=1).repeat(n, 1), y_sender_samples)
+        # # print('summed_log_receiver_distribution', summed_log_receiver_distribution.shape)
+        # loss = (y_sender_distribution.log_prob(y_sender_samples) - summed_log_receiver_distribution)
+        # # print(loss.shape, 'y_sender_distribution log probs', y_sender_distribution.log_prob(y_sender_samples).shape, 'summed_log_receiver_distribution', summed_log_receiver_distribution.shape)
+
+        # receiver_mix_dist = dist.Categorical(probs=output_distribution, validate_args=False)
+        # receiver_components = dist.Normal(
+        #     self.k_centers, (1.0 / alpha.sqrt()).unsqueeze(-1), validate_args=False
+        # )
+        # receiver_dist = dist.MixtureSameFamily(receiver_mix_dist, receiver_components, validate_args=False)
+
+        # y = y_sender_distribution.sample(torch.Size([monte_carlo_samples]))
+        # loss = (
+        #     (y_sender_distribution.log_prob(y) - receiver_dist.log_prob(y))
+        #     .mean(0)
+        #     .flatten(start_dim=1)
+        #     .mean(1, keepdims=True)
+        # )
+        loss = torch.mean(n*loss)
+        # print(loss)
         return loss
 
     @torch.inference_mode()
