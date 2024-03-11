@@ -7,16 +7,30 @@ import numpy as np
 
 from .utils import quantize
 
-def rgb_image_transform(x, num_bins=256):
+def rgb_image_transform(x, num_bins=16):
     return quantize((x * 2) - 1, num_bins).permute(1, 2, 0).contiguous()
 
 class CIFAR10(torchvision.datasets.CIFAR10):
+
+    def __init__(self, *args, exclude_list=[0, 1, 3, 4, 5, 6, 7, 8, 9], **kwargs):
+        super(CIFAR10, self).__init__(*args, **kwargs)
+        if exclude_list == []:
+            return
+        labels = np.array(self.targets)
+        exclude = np.array(exclude_list).reshape(1, -1)
+        mask = ~(labels.reshape(-1, 1) == exclude).any(axis=1)
+        self.data = self.data[mask]
+        self.train_labels = labels[mask].tolist()
+
     def __getitem__(self, idx):
         return super().__getitem__(idx)[0]
+    
+        
     
 def get_standard_transform(num_bins, train=True):
     return transforms.Compose([transforms.ToTensor(),
                             transforms.RandomHorizontalFlip() if train else nn.Identity(),
+                            transforms.RandomAutocontrast() if train else nn.Identity(),
                             transforms.Lambda(lambda x: rgb_image_transform(x, num_bins)),])
 
 def get_cifar10_datasets(num_bins:int = 16, root='./datasets/') -> tuple[Dataset, Dataset, Dataset]:
