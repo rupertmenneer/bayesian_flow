@@ -101,7 +101,8 @@ class DiscretisedBFNTrainer():
               sampling_interval_step: int = 250,
               save_checkpoint_interval_step: int = 100,
               clip_grad: float = 2.0,
-              n_test_batches: int = 0):
+              n_test_batches: int = 0,
+              n_time_steps: int = 100,):
         
         if num_epochs is None:
             num_epochs = self.num_epochs
@@ -119,7 +120,10 @@ class DiscretisedBFNTrainer():
                 self.optim.zero_grad()
 
                 # model inference
-                loss = self.bfn_model.continuous_time_loss_for_discretised_data(batch.to(self.device))
+                if n_time_steps > 0:
+                    loss = self.bfn_model.discrete_time_loss_for_discretised_data(batch.to(self.device), n=n_time_steps)
+                else:
+                    loss = self.bfn_model.continuous_time_loss_for_discretised_data(batch.to(self.device))
 
                 loss.backward()
                 # clip grads
@@ -203,16 +207,16 @@ class DiscretisedBFNTrainer():
 
         
     def save_model(self, save_path: str = '/home/rfsm2/rds/hpc-work/MLMI4/bfn_model_checkpoint'):
-        self.bfn_model.eval()
-
-        checkpoint = { 
-        'epoch': self.epoch,
-        'step': self.step,
-        'model': self.bfn_model.state_dict(),
-        'optim': self.optim.state_dict(),
-        }
-        # 'lr_sched': self.lr_sched
-        save_path = save_path + '.pth'
-        print(save_path)
-        torch.save(checkpoint, save_path)
+        with self.ema.average_parameters():
+            self.bfn_model.eval()
+            checkpoint = { 
+            'epoch': self.epoch,
+            'step': self.step,
+            'model': self.bfn_model.state_dict(),
+            'optim': self.optim.state_dict(),
+            }
+            # 'lr_sched': self.lr_sched
+            save_path = save_path + '.pth'
+            print(save_path)
+            torch.save(checkpoint, save_path)
     
