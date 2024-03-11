@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 import torch.distributions as dist
 from typing import Tuple
+from einops import rearrange
 
 CONST_log_min = 1e-10
 CONST_exp_range = 10
@@ -43,7 +44,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             get_normal_sample(mu, std): Samples from a normal distribution.
     """
 
-    def __init__(self, model: nn.Module, k: int =16, sigma_one: float = 0.02, device: str ='cpu') -> None:
+    def __init__(self, model: nn.Module, k: int =16, sigma_one: float = 0.02, device: str ='cpu', dynamic_thresholding_percentile =  0.995) -> None:
 
         super(BayesianFlowNetworkDiscretised, self).__init__()
         assert (k >= 2)
@@ -51,6 +52,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         self.k = k
         self.model = model
         self.sigma_one = torch.tensor(sigma_one, device=device)
+        self.dynamic_thresholding_percentile = dynamic_thresholding_percentile
 
         # Calculate the lower and upper bounds for all bins -> shape: Tensor[K]
         self.k_centers = self.get_k_centers()
@@ -83,7 +85,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         return mean.squeeze(-1), log_var.squeeze(-1)
 
     
-    def discretised_output_distribution(self, mu: Tensor, t: Tensor, gamma: Tensor, t_min=1e-6) -> Tensor:
+    def discretised_output_distribution(self, mu: Tensor, t: Tensor, gamma: Tensor, t_min=1e-6, dynamic_threshold=True) -> Tensor:
         """
         Calculates a discretised output distribution based on the given parameters. 
         E.g. given a normal distribution and K bins, this function will return the probability of each bin.
@@ -116,7 +118,20 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         sigma_x = torch.where(t < t_min, torch.ones_like(sigma_x), sigma_x)
 
         # clip output mu to be between viable range (as mentioned in page 16 of paper)
-        mu_x = torch.clamp(mu_x, -1, 1)
+        if dynamic_threshold:
+            # following pseudocode in appendix
+            # s is the dynamic threshold, determined by percentile of absolute values of reconstructed sample per batch element
+            s = torch.quantile(
+                rearrange(mu_x, 'b ... -> b (...)').abs(),
+                self.dynamic_thresholding_percentile,
+                dim = -1
+            )
+
+            s.clamp_(min = 1.)
+            s = right_pad_dims_to(mu_x, s)
+            mu_x = mu_x.clamp(-s, s) / s
+        else:
+            mu_x.clamp_(-1., 1.)
 
         # Calculate the discretised output distribution using vectorized operations
         # print("Mu_x", mu_x.shape, 'sigma_x', sigma_x.shape, 'k_lower', self.k_lower.shape, 'k_upper', self.k_upper.shape)
@@ -191,17 +206,11 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         """
         Calculates the discrete time loss for discretised data. A.k.a Loss n from algorithm 4 page 26.
 
-        1) sample time from 1 to N e.g. 25, then set to be fraction of this time
-        2) set gamma to be 1-sigma_one^2*t
-        3) create an estimate for the mean of the sender sample (this is noisy) µ ~ N(gamma*x, gamma(1-gamma))
-        4) pass the noisy samples to the model, output a continuous distribution and rediscretise it
-        5) calculate KL based loss between the discretised output distribution and the original discretised data
-
         Args:
             discretised_data (Tensor): Real data samples from the discretised distribution. Shape: [B, D]
 
         Returns:
-            Tensor: Loss 'Infinity' value.
+            Tensor: Loss 'n' value.
         """
 
         # Shape-> Tensor[B, D] data is samples from the discretised distribution
@@ -212,7 +221,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
 
 
         # time, gamma -> Tensor[B, 1]
-        i = torch.randint(1, n, (batch_size, 1))
+        i = torch.randint(1, n, (batch_size, 1), device=self.device)
         t = torch.clamp((i-1)/n, 1e-6)
         t = right_pad_dims_to(t, discretised_data)
         gamma = right_pad_dims_to(self.get_gamma_t(t), discretised_data)
@@ -309,8 +318,8 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         return output_mean, prior_tracker
 
     # alpha parameter used during sample generation - algorithm 6
-    def get_alpha(self, i, n_steps) -> float:
-        return (self.sigma_one ** (-2 * i / n_steps)) * (1 - self.sigma_one ** (2 / n_steps))
+    def get_alpha(self, t, n_steps) -> float:
+        return (self.sigma_one ** (-2 * t / n_steps)) * (1 - self.sigma_one ** (2 / n_steps))
 
     # update the priors based off new estimate - algorithm 6
     def update_prior_distribution(self, prior_mean: Tensor, prior_precision: Tensor, y: Tensor, alpha: float) -> Tuple[Tensor, Tensor]:
