@@ -1,9 +1,6 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-import numpy as np
+from torch.utils.data import Dataset
+from .utils import quantize
 
 class DiscretisedBimodalData(Dataset):
     """
@@ -49,8 +46,8 @@ class DiscretisedBimodalData(Dataset):
 
     def create_discretised_bimodal(self):
         # Create a bimodal distribution and generate samples from it
-        mean_0, std_0 = -1, 0.3
-        mean_1, std_1 = 1, 0.3
+        mean_0, std_0 = -1, 0.25
+        mean_1, std_1 = 1, 0.25
         dist_0 = torch.distributions.normal.Normal(mean_0, std_0)
         dist_1 = torch.distributions.normal.Normal(mean_1, std_1)
         samples_0 = dist_0.sample((self.n // 2,))
@@ -68,13 +65,3 @@ class DiscretisedBimodalData(Dataset):
 
         return discretised_data
     
-def idx_to_float(idx: np.ndarray, num_bins: int):
-    flt_zero_one = (idx + 0.5) / num_bins
-    return (2.0 * flt_zero_one) - 1.0
-
-def float_to_idx(flt: np.ndarray, num_bins: int):
-    flt_zero_one = (flt / 2.0) + 0.5
-    return torch.clamp(torch.floor(flt_zero_one * num_bins), min=0, max=num_bins - 1).long()
-
-def quantize(flt, num_bins: int):
-    return idx_to_float(float_to_idx(flt, num_bins), num_bins)

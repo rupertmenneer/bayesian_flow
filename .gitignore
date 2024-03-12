@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+wandb
+
+# datasets
+cifar-10-batches-py/
+cifar-10-python.tar.gz
 
 # C extensions
 *.so
@@ -26,6 +31,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.tar.gz
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
