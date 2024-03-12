@@ -32,7 +32,7 @@ class DiscretisedBFNTrainer():
                  dataset: str = 'cifar10',
                  wandb_project_name: str = "bayesian_flow",
                  checkpoint_file: str = None,
-                 checkpoint_save_path: str = '/home/rfsm2/rds/hpc-work/MLMI4/bfn_model_checkpoint'):
+                 checkpoint_save_path: str = '/home/rfsm2/rds/hpc-work/MLMI4/bfn_model_checkpoint_8_hour_cat_horse_car'):
        
         self.k = k
         self.device = device
@@ -98,11 +98,11 @@ class DiscretisedBFNTrainer():
     def train(self,
               num_epochs: int = None,
               validation_interval_epoch: int = 1,
-              sampling_interval_step: int = 250,
+              sampling_interval_step: int = 5000,
               save_checkpoint_interval_step: int = 100,
-              clip_grad: float = 2.0,
+              clip_grad: float = 5.0,
               n_test_batches: int = 0,
-              n_time_steps: int = 100,):
+              n_time_steps: int = 400,):
         
         if num_epochs is None:
             num_epochs = self.num_epochs
@@ -145,7 +145,7 @@ class DiscretisedBFNTrainer():
 
                 # Sampling stage
                 if self.step % sampling_interval_step == 0:
-                    self.sample()
+                    self.sample(n_time_steps=n_time_steps)
 
                 if self.step % save_checkpoint_interval_step == 0:
                     self.save_model(save_path=self.checkpoint_save_path)
@@ -158,7 +158,7 @@ class DiscretisedBFNTrainer():
 
             # Validation check
             if i % validation_interval_epoch == 0:
-                self.validate()
+                self.validate(n_time_steps=n_time_steps)
 
 
         self.epoch += 1        
@@ -166,13 +166,18 @@ class DiscretisedBFNTrainer():
 
 
     @torch.no_grad()
-    def validate(self):
+    def validate(self, n_time_steps: int = 0):
         self.bfn_model.eval()
         val_losses = []
 
-        for _, batch in enumerate(self.val_dls):
-            loss = self.bfn_model.continuous_time_loss_for_discretised_data(batch.to(self.device))
-            val_losses.append(loss.item())
+        with self.ema.average_parameters():
+            for _, batch in enumerate(self.val_dls):
+                # model inference
+                if n_time_steps > 0:
+                    loss = self.bfn_model.discrete_time_loss_for_discretised_data(batch.to(self.device), n=n_time_steps)
+                else:
+                    loss = self.bfn_model.continuous_time_loss_for_discretised_data(batch.to(self.device))
+                val_losses.append(loss.item())
 
         epoch_val_loss = torch.mean(torch.tensor(val_losses))
         if self.wandb_project_name is not None:
@@ -180,16 +185,16 @@ class DiscretisedBFNTrainer():
 
         if epoch_val_loss < self.best_val_loss:
             self.best_val_loss = epoch_val_loss
-            self.save_model(save_path=self.checkpoint_save_path+'best_val')
+            self.save_model(save_path=self.checkpoint_save_path+'_best_val')
 
 
     @torch.no_grad()
-    def sample(self, sample_shape = (8, 32, 32, 3)):
+    def sample(self, sample_shape = (8, 32, 32, 3), n_time_steps: int = 250):
         self.bfn_model.eval()
         
         # Generate samples and priors
         with self.ema.average_parameters():
-            samples, priors = self.bfn_model.sample_generation_for_discretised_data(sample_shape=sample_shape)
+            samples, priors = self.bfn_model.sample_generation_for_discretised_data(sample_shape=sample_shape, n_steps=n_time_steps)
             samples = samples.to(torch.float32)
         
         image_grid = get_image_grid_from_tensor(samples.transpose(1, 3))
@@ -207,11 +212,14 @@ class DiscretisedBFNTrainer():
 
         
     def save_model(self, save_path: str = '/home/rfsm2/rds/hpc-work/MLMI4/bfn_model_checkpoint'):
+
         with self.ema.average_parameters():
             self.bfn_model.eval()
+
             checkpoint = { 
             'epoch': self.epoch,
             'step': self.step,
+            # TODO: replace with torch ema state dict
             'model': self.bfn_model.state_dict(),
             'optim': self.optim.state_dict(),
             }
