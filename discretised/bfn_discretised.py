@@ -253,7 +253,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         return loss
 
     @torch.inference_mode()
-    def sample_generation_for_discretised_data(self, sample_shape:tuple = (8, 32, 32, 3), n_steps:int = 100):
+    def sample_generation_for_discretised_data(self, sample_shape:tuple = (8, 32, 32, 3), n_steps:int = 100, seed: int = None):
         """
         Generates new discretised samples using the Bayesian flow model.
         Sample generation algorithm 6 page 26.
@@ -267,6 +267,9 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             prior_tracker (torch.Tensor): Prior distribution tracker over time. Shape: [B, D, 2, n_steps+1]
         """
 
+        if seed is not None:
+            torch.manual_seed(seed)
+
         bs = sample_shape[0]
 
         # initialise prior with a standard normal distribution ~ N(0, 1)
@@ -275,7 +278,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         d = prior_mu.shape[1]
 
         # tracks prior distribution over time (mean and var)
-        prior_tracker = torch.zeros(bs, d, 2, n_steps+1)
+        prior_tracker = torch.zeros(bs, d, 3, n_steps+1)
 
         # iterate over n_steps
         for i in range(1, n_steps+1):
@@ -284,6 +287,8 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             t = right_pad_dims_to(self.get_time_at_t((i-1)/n_steps, bs=bs), prior_mu)
             gamma = right_pad_dims_to(self.get_gamma_t(t), prior_mu)
 
+            # input dist
+            prior_tracker[:, :, 0, i] = prior_mu
             # Tensor[B, D, K]
             output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
 
@@ -299,8 +304,11 @@ class BayesianFlowNetworkDiscretised(nn.Module):
             y_sample = self.get_normal_sample(mean, std)
 
             # Logging: track the prior precisions and means
-            prior_tracker[:, :, 0, i] = y_sample
-            prior_tracker[:, :, 1, i] = prior_precision
+            # output dist
+            prior_tracker[:, :, 1, i] = mean
+            # noisy sample
+            prior_tracker[:, :, 2, i] = y_sample 
+            
 
             # Tensor[B, D] - updated prior distribution based off new estimates
             prior_mu, prior_precision = self.update_prior_distribution(prior_mu, prior_precision, y_sample, alpha)
@@ -315,6 +323,79 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         output_mean = output_mean.view(sample_shape)
 
         return output_mean, prior_tracker
+    
+    @torch.inference_mode()
+    def repaint_sample_generation_for_discretised_data(self, image_for_inpainting,
+                                                       mask,
+                                                       repaint_steps:int=20,
+                                                       sample_shape:tuple = (8, 32, 32, 3),
+                                                       n_steps:int = 100,
+                                                       seed: int = None):
+        """
+        Generates new discretised samples using the Bayesian flow model.
+        Sample generation algorithm 6 page 26.
+
+        Args:
+            bs (int): Batch size. Default is 64.
+            n_steps (int): Number of steps to iterate over. Default is 50.
+
+        Returns:
+            output_mean (torch.Tensor): Final predictive distribution mean. Shape: [B, D]
+            prior_tracker (torch.Tensor): Prior distribution tracker over time. Shape: [B, D, 2, n_steps+1]
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+            
+        bs = sample_shape[0]
+        image_for_inpainting = image_for_inpainting.view(bs, -1).to(self.device)
+        mask = mask.view(bs, -1).to(self.device) > 0.5
+
+        # initialise prior with a standard normal distribution ~ N(0, 1)
+        prior_mu = torch.zeros(sample_shape, device=self.device).view(bs, -1)
+        prior_precision = torch.tensor(1, device=self.device)
+        d = prior_mu.shape[1]
+
+        # iterate over n_steps
+        for i in range(1, n_steps+1):
+
+            # Tensor[B, 1] time is a linear step from 0 to 1, a fraction based off current time
+            t = right_pad_dims_to(self.get_time_at_t((i-1)/n_steps, bs=bs), prior_mu)
+            gamma = right_pad_dims_to(self.get_gamma_t(t), prior_mu)
+
+            # create a sender sample with known and unknown regions
+            repaint_mean = (~mask*prior_mu) + (mask*(image_for_inpainting*gamma))
+            repaint_std = torch.sqrt(gamma*(1-gamma))
+            for r in range(repaint_steps):
+                # repaint_sender_sample = self.get_normal_sample(repaint_mean, repaint_std)
+                # Tensor[B, D, K]
+                output_distribution = self.discretised_output_distribution(repaint_mean, t, gamma=gamma)
+                # Tensor[B, D]
+                mean = torch.sum(output_distribution*self.k_centers, dim=-1)
+                # update repaint mean, next iteration this is used for sampling with correct std
+                repaint_mean = (~mask*(mean*gamma)) + (mask*(image_for_inpainting*gamma))
+                repaint_mean = self.get_normal_sample(repaint_mean, repaint_std)
+
+            # Tensor [1]
+            alpha = self.get_alpha(i, n_steps)
+            # Tensor[1]
+            std = torch.sqrt(1/alpha)
+            # Tensor[B, D] sample from y distribution centered around 'K centers'
+            y_sample = self.get_normal_sample(mean, std)
+            prior_mu, prior_precision = self.update_prior_distribution(prior_mu, prior_precision, y_sample, alpha)
+
+
+        # Tensor[B, D, K] final pass of our distribution through the model to get final predictive distribution
+        t = right_pad_dims_to(torch.ones_like(t), prior_mu)
+        gamma = right_pad_dims_to(self.get_gamma_t(t), prior_mu)
+        output_distribution = self.discretised_output_distribution(prior_mu, t, gamma=gamma)
+        # Tensor[B, D] 
+        output_mean = torch.sum(output_distribution*self.k_centers, dim=-1)
+        # incorporate original_information e.g. it gets totally accurate mean - but still needs to sample from this
+        output_mean = (~mask*output_mean) + (mask*image_for_inpainting)
+        # final reshape back into requested sample shape
+        output_mean = output_mean.view(sample_shape)
+
+        return output_mean
 
     # alpha parameter used during sample generation - algorithm 6
     def get_alpha(self, t, n_steps) -> float:
