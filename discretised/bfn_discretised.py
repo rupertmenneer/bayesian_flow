@@ -85,7 +85,7 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         return mean.squeeze(-1), log_var.squeeze(-1)
 
     
-    def discretised_output_distribution(self, mu: Tensor, t: Tensor, gamma: Tensor, t_min=1e-6, dynamic_threshold=True) -> Tensor:
+    def discretised_output_distribution(self, mu: Tensor, t: Tensor, gamma: Tensor, t_min=1e-6, dynamic_threshold=False) -> Tensor:
         """
         Calculates a discretised output distribution based on the given parameters. 
         E.g. given a normal distribution and K bins, this function will return the probability of each bin.
@@ -117,16 +117,15 @@ class BayesianFlowNetworkDiscretised(nn.Module):
         mu_x = torch.where(t < t_min, torch.zeros_like(mu_x), mu_x)
         sigma_x = torch.where(t < t_min, torch.ones_like(sigma_x), sigma_x)
 
-        # clip output mu to be between viable range (as mentioned in page 16 of paper)
-        if dynamic_threshold:
-            # following pseudocode in appendix
+        # clip output mu to be between viable range (as mentioned in page 16 of paper -1 to 1 suggested in original)
+        if dynamic_threshold and mu.shape[-1] > 1:
+            # as per findings in Imagen paper dynamic scaling can work well - but makes no sense for single dim data
             # s is the dynamic threshold, determined by percentile of absolute values of reconstructed sample per batch element
             s = torch.quantile(
-                rearrange(mu_x, 'b ... -> b (...)').abs(),
+                abs(mu_x),
                 self.dynamic_thresholding_percentile,
                 dim = -1
             )
-
             s.clamp_(min = 1.)
             s = right_pad_dims_to(mu_x, s)
             mu_x = mu_x.clamp(-s, s) / s
