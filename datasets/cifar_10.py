@@ -12,7 +12,7 @@ def rgb_image_transform(x, num_bins=16):
 
 class CIFAR10(torchvision.datasets.CIFAR10):
 
-    def __init__(self, *args, exclude_list=[0, 1, 3, 4, 5, 6, 7, 8, 9], **kwargs):
+    def __init__(self, *args, exclude_list=[0, 2, 4, 5, 6, 8, 9], **kwargs):
         super(CIFAR10, self).__init__(*args, **kwargs)
         if exclude_list == []:
             return
