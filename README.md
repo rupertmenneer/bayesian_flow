@@ -4,7 +4,7 @@ This repo is a simple replication of the discrete and discretised implementation
 
 ### CIFAR 10 Sampling
 
-Data Expectation Distribution (Iutput distribution)
+Data Expectation Distribution (Output distribution)
 
 <img src="gifs/seed_113_data_expectation.gif" alt="CIFAR 10 data expectation over sampling" style="width:600px;"/>
 
