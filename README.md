@@ -2,6 +2,16 @@
 
 This repo is a simple replication of the discrete and discretised implementations of Bayesian flow networks (BFNs).
 
+### CIFAR 10 Sampling
+
+Data Expectation Distribution (Iutput distribution)
+
+<img src="gifs/seed_113_data_expectation.gif" alt="CIFAR 10 data expectation over sampling" style="width:600px;"/>
+
+Updated Prior (Input distribution)
+
+<img src="gifs/seed_113_updated_prior.gif" alt="CIFAR 10 updated prior over sampling" style="width:600px;"/>
+
 ### Sampling with different steps
 ![sampling_bfn](https://github.com/rupertmenneer/bayesian_flow/assets/71332436/925f03f8-9584-4e7c-a33b-228569523498)
 
