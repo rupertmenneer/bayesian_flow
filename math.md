@@ -71,3 +71,30 @@ L^{\infty}(\mathbf{x}) = K\beta(1) \mathbb{E}_{t\sim U(0,1),P_F(\mathbf{\theta}|
 $$
 
 
+###  Training algorithm
+**Algorithm 8 Continuous-Time Loss $L^\infty(\mathbf{x})$ for Discrete Data**
+
+**Require**: \( \beta(1) \in \mathbb{R}^+ \), number of classes \( K \in \mathbb{N} \)
+**Input**: discrete data \( x \in \{1, K\}^D \)
+
+- \( \tau \sim U(0, 1) \)
+- \( \beta \leftarrow \beta(1)\tau^2 \)
+- \( y \sim \mathcal{N} (\beta (Ke_x - 1) , \beta KI) \)
+- \( \theta \leftarrow \text{softmax}(y) \)
+- \( p_o( \cdot \mid \theta; t) \leftarrow \text{DISCRETE\_OUTPUT\_DISTRIBUTION}(\theta, t) \)  -- output distribution
+- \( \hat{e}(\theta, t) \leftarrow \left( \sum_k p_o^{(1)}(k \mid \theta; t)e_k, ..., \sum_k p_o^{(D)}(k \mid \theta; t)e_k \right) \) -- data expectation
+- \(e_x = \text{one\_hot}(x, \text{num\_classes}=K) \)
+- \( L^∞(x) \leftarrow K\beta(1)t \left\|e_x - \hat{e}(\theta, t)\right\|^2 \)
+----------------------------------------------------------------------
+**function** DISCRETE_OUTPUT_DISTRIBUTION(θ ∈ [0, 1]<sup>KD</sup>, t ∈ [0, 1])
+**Input** (θ, t) to network, receive Ψ(θ, t) as output
+**for** d ∈ {1, D} **do**
+  **if** k = 2 **then**
+   \( p_o^{(d)}(1 | \theta; t) \leftarrow \sigma(\Psi^{(d)}(\theta, t)) \)
+   \( p_o^{(d)}(2 | \theta; t) \leftarrow 1 - p_o^{(d)}(1 | \theta; t) \)
+  **else**
+   \( p_o^{(d)}( \cdot | \theta; t) \leftarrow \text{softmax}(\Psi^{(d)}(\theta, t)) \)
+  **end if**
+**end for**
+**Return** \( p_o( \cdot | \theta; t) \)
+**end function**
