@@ -24,6 +24,12 @@ Updated Prior (Input distribution)
 
 <img src="gifs/data_expectation_trajectories.gif" alt="Discretised 5 bin example, probability flow and example trajectories over time for data expectation." style="width:600px;"/>
 
+## Discrete Examples
+
+### Simplex with 3 Classes, Trajectories over time and Probablity Flow
+
+<img src="gifs/simplex.gif" alt="Bayesian Flow for discrete data visualized on a probability simplex for K=3 classes. White line is the sample trajectory for class 0, which is superimposed on log-scale heatmap of flow distribution over time." style="width:600px;"/>
+
 
 ### Sampling with different steps
 ![sampling_bfn](https://github.com/rupertmenneer/bayesian_flow/assets/71332436/925f03f8-9584-4e7c-a33b-228569523498)
