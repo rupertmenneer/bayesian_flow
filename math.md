@@ -10,6 +10,16 @@ $$p_I(\mathbf{x} | \theta) = \prod_{d=1}^{D} p_I(x^{(d)} | \theta^{(d)}).$$
 
 ## Discrete Data
 
+### Accuracy scheduler
+The guiding heuristic for β(t) is to decrease the expected entropy of the input distribution linearly with t.
+$$\beta(t) =  t^2 \beta(1), \tag{182}$$
+
+$$\alpha(t) = \frac{d\beta(t)}{dt} = \beta(1)2t, \tag{183}$$
+
+$\beta(1)$ is determined empirically for each experiment.
+
+
+
 ### Discrete time loss
 
 
@@ -27,10 +37,6 @@ $t$ is time
 $\mathbf{\theta}$ are parameters of data distribution (i.e. Categorical)
 $\mathbf{y}$ is the noisy sample from sender
 $\mathbf{e_x}$ is the one-hot vector of data
-$
-\alpha(t) = \frac{d\beta(t)}{dt} = \beta(1)2t.
-$
-$β(1)$ is determined empirically for each experiment.
 
 
 
@@ -38,7 +44,7 @@ $β(1)$ is determined empirically for each experiment.
 
 
 $$
-L^{\infty}(x) = K\beta(1) \mathbb{E}_{t\sim U(0,1),P_F(\mathbb{\theta}|\mathbb{x},t)} \left[ t\left\| \mathbb{e_x} - \mathbb{\hat{e}}(\mathbb{\theta}, t) \right\|^2 \right] \tag{205}
+L^{\infty}(\mathbf{x}) = K\beta(1) \mathbb{E}_{t\sim U(0,1),P_F(\mathbf{\theta}|\mathbf{x},t)} \left[ t\left\| \mathbf{e_x} - \mathbf{\hat{e}}(\mathbf{\theta}, t) \right\|^2 \right] \tag{205}
 $$
 
 
