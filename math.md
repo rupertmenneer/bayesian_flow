@@ -44,11 +44,10 @@ Discretised data is data considered to be truly continuous, but must fit within 
 
 ### Accuracy scheduler
 
-Accuracy scheduler $\beta(t)$ for discretised and continuous data id derived with the requirement that the expected entropy of the input distribution linearly decreases with t. Intuitively, this means that information flows into the input distribution at a constant rate.
+Accuracy scheduler $\beta(t)$ for discretised and continuous data is derived with the requirement that the expected entropy of the input distribution linearly decreases with t. Intuitively, this means that information flows into the input distribution at a constant rate.
 The level of measurement noise informs the choice of $\sigma_1$ which informs accuracy schedule $\beta(t)$, hence the choice of $\sigma_1$ is informed by the width of the discretisation bins, as these place a natural limit on how precisely the data needs to be transmitted. E.g. for 8-bit data with 256 bins and hence a bin width of 1/128, setting  $\sigma_1$ = 1e−3.
 
  $$ \beta(t) = 1 - \sigma_1^{2t}$$
-
 
 
 ### Discretised Data Loss - Continuous Time
@@ -57,7 +56,7 @@ $$
 L^{\infty}(x) = -\ln \sigma_{1} \sigma_{1}^{-2t} \left\| x - \hat{k}(\theta, t) \right\|^2
 $$
 
-the scaling term $\ln \sigma_1 \sigma_1^{-2t}$ adds bigger penatly towards the end of the run, as accuracy is scheduled to increase with $t$ (i.e. the noise level decreases), hence the bigger penalty for an easier task.
+the scaling term $\ln \sigma_1 \sigma_1^{-2t}$ adds bigger penalty towards the end of the run, as accuracy is scheduled to increase with $t$ (i.e. the noise level decreases), hence the bigger penalty for an easier task.
 
 '''
 
@@ -204,16 +203,15 @@ $\beta(1)$ is determined empirically for each experiment.
 
 ![accuracy](./images/discrete_accuracy_scheduler.png )
 
-**Figure 9: Accuracy schedule vs. expected entropy for discrete data.** The surface plot shows the
-expectation over the parameter distribution $p(θ | x; β)$ of the entropy of the categorical input distribution
-$p(x | θ)$ for K = 2 to 30 and $\sqrtβ$ = 0.01 to 3. The red and cyan lines highlight the entropy curves for 2 and 27 classes, the two values that occur in the original paper experiments. The red and cyan stars show the corresponding values we chose for p$\sqrtβ(1)$. (Graves et. al. 2023, p.34)
+**Figure 9: Accuracy schedule vs. expected entropy for discrete data.** The surface plot shows the expectation over the parameter distribution $p(θ | x; β)$ of the entropy of the categorical input distribution $p(x | θ)$ for K = 2 to 30 and $\sqrtβ$ = 0.01 to 3. The red and cyan lines highlight the entropy curves for 2 and 27 classes, the two values that occur in the original paper experiments. The red and cyan stars show the corresponding values we chose for p$\sqrtβ(1)$. (Graves et. al. 2023, p.34)
 
 
 ### Discrete time loss
 
+Discrete-time loss:  
 
 $$
-L^n(\mathbf{x}) = n \mathbb{E}_{t\sim U\{1,n\},P(\mathbb{\theta}|\mathbb{x},t_{i-1}), \mathcal{N}\left(\mathbf{y}|\alpha_{i}(K \mathbf{e_x} - 1),\alpha_{i}K\mathbf{I}\right) } \left[ \mathcal{N}\left(\mathbf{y}|\alpha_{i}(K \mathbf{e_x} - 1),\alpha_{i}K\mathbf{I}\right) \right] \tag{189}
+L^n(\mathbf{x}) = n \mathbf{E}_{t\sim U\{1,n\},P(\mathbf{\theta}|\mathbf{x},t_{i-1}), \mathcal{N}\left(\mathbf{y}|\alpha_{i}(K \mathbf{e_x} - 1),\alpha_{i}K\mathbf{I}\right) } \left[ \mathcal{N}\left(\mathbf{y}|\alpha_{i}(K \mathbf{e_x} - 1),\alpha_{i}K\mathbf{I}\right) \right] \tag{189}
 $$
 
 $$
@@ -240,10 +238,10 @@ $$
 ###  Training algorithm
 **Algorithm 8 Continuous-Time Loss $L^\infty(\mathbf{x})$ for Discrete Data**
 
-**Require**: \( \beta(1) \in \mathbb{R}^+ \), number of classes \( K \in \mathbb{N} \)
-**Input**: discrete data \( x \in \{1, K\}^D \)
+**Require**: \( \beta(1) \in \mathbb{R}^+ \), number of classes \( K \in \mathbb{N} \)  
+**Input**: discrete data \( x \in \{1, K\}^D \)  
 
-- \( \tau \sim U(0, 1) \)
+$ \tau \sim U(0, 1) $
 - \( \beta \leftarrow \beta(1)\tau^2 \)
 - \( y \sim \mathcal{N} (\beta (Ke_x - 1) , \beta KI) \)
 - \( \theta \leftarrow \text{softmax}(y) \)
@@ -252,15 +250,15 @@ $$
 - \(e_x = \text{one\_hot}(x, \text{num\_classes}=K) \)
 - \( L^∞(x) \leftarrow K\beta(1)t \left\|e_x - \hat{e}(\theta, t)\right\|^2 \)
 ----------------------------------------------------------------------
-**function** DISCRETE_OUTPUT_DISTRIBUTION(θ ∈ [0, 1]<sup>KD</sup>, t ∈ [0, 1])
-**Input** (θ, t) to network, receive Ψ(θ, t) as output
-**for** d ∈ {1, D} **do**
-  **if** k = 2 **then**
-   \( p_o^{(d)}(1 | \theta; t) \leftarrow \sigma(\Psi^{(d)}(\theta, t)) \)
-   \( p_o^{(d)}(2 | \theta; t) \leftarrow 1 - p_o^{(d)}(1 | \theta; t) \)
-  **else**
-   \( p_o^{(d)}( \cdot | \theta; t) \leftarrow \text{softmax}(\Psi^{(d)}(\theta, t)) \)
-  **end if**
-**end for**
-**Return** \( p_o( \cdot | \theta; t) \)
-**end function**
+**function** DISCRETE_OUTPUT_DISTRIBUTION(θ ∈ [0, 1]<sup>KD</sup>, t ∈ [0, 1])  
+**Input** (θ, t) to network, receive Ψ(θ, t) as output  
+**for** d ∈ {1, D} **do**  
+  **if** k = 2 **then**  
+   $ p_o^{(d)}(1 | \theta; t) \leftarrow \sigma(\Psi^{(d)}(\theta, t))$   
+   $ p_o^{(d)}(2 | \theta; t) \leftarrow 1 - p_o^{(d)}(1 | \theta; t) $  
+  **else**  
+   \( p_o^{(d)}( \cdot | \theta; t) \leftarrow \text{softmax}(\Psi^{(d)}(\theta, t)) \)  
+  **end if**  
+**end for**  
+**Return** \( p_o( \cdot | \theta; t) \)  
+**end function**  
