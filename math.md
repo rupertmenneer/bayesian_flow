@@ -38,6 +38,7 @@ $$\alpha(t) = \frac{d\beta(t)}{dt} = \beta(1)2t, \tag{183}$$
 $\beta(1)$ is determined empirically for each experiment.
 
 ![accuracy](./images/discrete_accuracy_scheduler.png )
+
 **Figure 9: Accuracy schedule vs. expected entropy for discrete data.** The surface plot shows the
 expectation over the parameter distribution $p(θ | x; β)$ of the entropy of the categorical input distribution
 $p(x | θ)$ for K = 2 to 30 and $\sqrtβ$ = 0.01 to 3. The red and cyan lines highlight the entropy curves for 2 and 27 classes, the two values that occur in the original paper experiments. The red and cyan stars show the corresponding values we chose for p$\sqrtβ(1)$. (Graves et. al. 2023, p.34)
