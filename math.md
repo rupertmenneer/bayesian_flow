@@ -7,17 +7,40 @@ This is the prior over data. Each dimension is considered independent. The input
 
 $$p_I(\mathbf{x} | \theta) = \prod_{d=1}^{D} p_I(x^{(d)} | \theta^{(d)}).$$
 
+## Discretised Data
+
+### Accuracy scheduler
+
+Accuracy scheduler $\beta(t)$ for discretised and continuous data id derived with the requirement that the expected entropy of the input distribution linearly decreases with t. Intuitively, this means that information flows into the input distribution at a constant rate.
+The level of measurement noise informs the choice of $\sigma_1$ which informs accuracy schedule $\beta(t)$, hence the choice of $\sigma_1$ is informed by the width of the discretisation bins, as these place a natural limit on how precisely the data needs to be transmitted. E.g. for 8-bit data with 256 bins and hence a bin width of 1/128, setting  $\sigma_1$ = 1e−3.
+
+ $$ \beta(t) = 1 - \sigma_1^{2t}$$
+
+
+In the continuous tiem loss
+$$
+L^{\infty}(x) = -\ln \sigma_{1} \sigma_{1}^{-2t} \left\| x - \hat{k}(\theta, t) \right\|^2
+$$
+
+the scaling term $\ln \sigma_1 \sigma_1^{-2t}$ adds bigger penatly towards the end of the run, as accuracy is scheduled to increase with $t$ (i.e. the noise level decreases), hence the bigger penalty for an easier task.
+
+
 
 ## Discrete Data
 
 ### Accuracy scheduler
-The guiding heuristic for β(t) is to decrease the expected entropy of the input distribution linearly with t.
+The guiding heuristic for accuracy scheduler β(t) is to decrease the expected entropy of the input distribution linearly with t.
 $$\beta(t) =  t^2 \beta(1), \tag{182}$$
+$\alpha(t)$ is related to $\beta(t)$ in the following way:
 
 $$\alpha(t) = \frac{d\beta(t)}{dt} = \beta(1)2t, \tag{183}$$
 
 $\beta(1)$ is determined empirically for each experiment.
 
+![accuracy](./images/discrete_accuracy_scheduler.png )
+**Figure 9: Accuracy schedule vs. expected entropy for discrete data.** The surface plot shows the
+expectation over the parameter distribution $p(θ | x; β)$ of the entropy of the categorical input distribution
+$p(x | θ)$ for K = 2 to 30 and $\sqrtβ$ = 0.01 to 3. The red and cyan lines highlight the entropy curves for 2 and 27 classes, the two values that occur in the original paper experiments. The red and cyan stars show the corresponding values we chose for p$\sqrtβ(1)$. (Graves et. al. 2023, p.34)
 
 
 ### Discrete time loss
