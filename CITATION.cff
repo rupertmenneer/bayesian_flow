@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Menneer"
+  given-names: "Rupert"
+- family-names: "Sinkovics"
+  given-names: "Krisztina"
+- family-names: "Ou"
+  given-names: "Yuxuan"
+
+title: "bayesian_flow"
+version: 1.0.0
+doi: 10.5281/zenodo.1234
+date-released: 2024-03-23
+url: "https://github.com/rupertmenneer/bayesian_flow"
